@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">X3player</string>
+    <string name="permission_title">Video access needed</string>
+    <string name="permission_message">Grant local media access so X3player can browse videos already copied to the glasses.</string>
+    <string name="grant_access">Grant access</string>
+    <string name="check_again">Check again</string>
+    <string name="library_title">Local Videos</string>
+    <string name="library_subtitle">Minimal playback for RayNeo X3 Pro</string>
+    <string name="filter_all">All</string>
+    <string name="filter_movies">Movies</string>
+    <string name="filter_downloads">Downloads</string>
+    <string name="refresh">Refresh</string>
+    <string name="auto_resume">Resume</string>
+    <string name="reopen_last">Reopen last</string>
+    <string name="sort_newest">Sort: Newest</string>
+    <string name="back">Back</string>
+    <string name="play">Play</string>
+    <string name="seek_back">-10s</string>
+    <string name="seek_forward">+10s</string>
+    <string name="previous">Prev</string>
+    <string name="next">Next</string>
+    <string name="restart">Restart</string>
+    <string name="volume_down">Vol-</string>
+    <string name="volume_up">Vol+</string>
+    <string name="library">Library</string>
+</resources>

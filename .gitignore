@@ -1,0 +1,11 @@
+.gradle/
+**/build/
+local.properties
+*.iml
+.idea/caches/
+.idea/libraries/
+.idea/modules.xml
+.idea/navEditor.xml
+.idea/runConfigurations/
+.DS_Store
+Thumbs.db
