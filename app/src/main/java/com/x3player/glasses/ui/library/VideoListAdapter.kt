@@ -45,8 +45,6 @@ class VideoListAdapter(
             binding.root.setOnClickListener { onVideoClicked(item, position) }
             binding.root.isActivated = selected
             binding.root.isSelected = selected
-            binding.root.scaleX = if (selected) 1.03f else 1f
-            binding.root.scaleY = if (selected) 1.03f else 1f
             binding.videoTitle.setTextColor(
                 ContextCompat.getColor(
                     binding.root.context,

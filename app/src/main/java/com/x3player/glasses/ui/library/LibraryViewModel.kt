@@ -75,6 +75,15 @@ class LibraryViewModel(
         }
     }
 
+    fun cycleFilter() {
+        val next = when (uiState.value.filter) {
+            LibraryFilter.ALL -> LibraryFilter.MOVIES
+            LibraryFilter.MOVIES -> LibraryFilter.DOWNLOADS
+            LibraryFilter.DOWNLOADS -> LibraryFilter.ALL
+        }
+        setFilter(next)
+    }
+
     fun cycleSort() {
         val next = when (uiState.value.sort) {
             LibrarySort.DATE_DESC -> LibrarySort.NAME_ASC

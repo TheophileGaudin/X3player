@@ -33,7 +33,7 @@ class MainActivity : AppCompatActivity(), LibraryFragment.Callbacks, PlayerFragm
         private const val TAP_MAX_DISTANCE = 50f
         private const val TAP_MAX_DURATION = 300L
         private const val FOCUS_MOVE_THRESHOLD_X = 18f
-        private const val FOCUS_MOVE_THRESHOLD_Y = 18f
+        private const val FOCUS_MOVE_THRESHOLD_Y = 108f
     }
 
     private lateinit var binding: ActivityMainBinding
@@ -85,12 +85,12 @@ class MainActivity : AppCompatActivity(), LibraryFragment.Callbacks, PlayerFragm
         super.onDestroy()
     }
 
-    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
-        return if (handleTempleInteraction(event)) true else super.onGenericMotionEvent(event)
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        return if (handleTempleInteraction(event)) true else super.dispatchGenericMotionEvent(event)
     }
 
-    override fun onTouchEvent(event: MotionEvent): Boolean {
-        return if (handleTempleInteraction(event)) true else super.onTouchEvent(event)
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        return if (handleTempleInteraction(event)) true else super.dispatchTouchEvent(event)
     }
 
     override fun onVideoSelected(items: List<VideoItem>, index: Int) {

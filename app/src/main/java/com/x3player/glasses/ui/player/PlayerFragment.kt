@@ -6,6 +6,7 @@ import android.media.AudioManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.KeyEvent
 import android.view.LayoutInflater
 import android.view.View
@@ -46,17 +47,19 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
         fun onExitPlayerRequested()
     }
 
-    private enum class PlayerSelection {
+    private enum class MainControl {
+        BACK,
+        PLAY_PAUSE,
+        RESTART,
+        STOP,
+        PROGRESS,
+        OPTIONS,
+    }
+
+    private enum class AdvancedControl {
         BACK,
         PREVIOUS,
-        SEEK_BACK,
-        PLAY_PAUSE,
-        SEEK_FORWARD,
         NEXT,
-        RESTART,
-        VOLUME_DOWN,
-        VOLUME_UP,
-        LIBRARY,
     }
 
     private var _binding: FragmentPlayerBinding? = null
@@ -71,9 +74,14 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
     private var player: ExoPlayer? = null
     private var mediaSession: MediaSession? = null
     private var currentItem: VideoItem? = null
-    private var selection: PlayerSelection = PlayerSelection.PLAY_PAUSE
+    private var mainSelection: MainControl = MainControl.PLAY_PAUSE
+    private var advancedSelection: AdvancedControl = AdvancedControl.BACK
+    private var lastProgressTapAt = 0L
+    private var lastProgressForwardDelta = 0L
+
     private val uiHandler = Handler(Looper.getMainLooper())
     private val controlsHideRunnable = Runnable { setControlsVisible(false) }
+    private val progressForwardRunnable = Runnable { applyDeferredForwardSeek() }
     private val positionUpdateRunnable = object : Runnable {
         override fun run() {
             updatePositionViews()
@@ -156,6 +164,7 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
     override fun onDestroyView() {
         uiHandler.removeCallbacks(positionUpdateRunnable)
         uiHandler.removeCallbacks(controlsHideRunnable)
+        uiHandler.removeCallbacks(progressForwardRunnable)
         savePlaybackProgress()
         releasePlayer()
         requireActivity().window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -172,9 +181,18 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
     override fun onTempleNavigate(direction: TempleDirection): Boolean {
         if (binding.controlsOverlay.visibility != View.VISIBLE) {
             setControlsVisible(true)
-            return true
         }
-        selection = navigate(selection, direction)
+
+        if (isAdvancedOptionsVisible()) {
+            advancedSelection = navigateAdvanced(advancedSelection, direction)
+        } else {
+            val previousSelection = mainSelection
+            mainSelection = navigateMain(mainSelection, direction)
+            if (previousSelection != MainControl.PROGRESS || mainSelection != MainControl.PROGRESS) {
+                resetProgressTapGesture()
+            }
+        }
+        setControlsVisible(true, keepVisible = true)
         applySelection()
         return true
     }
@@ -184,7 +202,15 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
             setControlsVisible(true)
             return true
         }
-        selectionView(selection)?.performClick()
+
+        if (isAdvancedOptionsVisible()) {
+            selectionView(advancedSelection)?.performClick()
+        } else {
+            if (mainSelection != MainControl.PROGRESS) {
+                resetProgressTapGesture()
+            }
+            selectionView(mainSelection)?.performClick()
+        }
         applySelection()
         return true
     }
@@ -219,24 +245,34 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
                 handleKeyEvent(keyCode, event)
             }
             setOnClickListener {
-                setControlsVisible(!binding.controlsOverlay.isShown)
+                if (isAdvancedOptionsVisible()) {
+                    closeAdvancedOptions()
+                } else {
+                    setControlsVisible(!binding.controlsOverlay.isShown)
+                }
             }
         }
 
         binding.playerView.setOnClickListener {
-            setControlsVisible(!binding.controlsOverlay.isShown)
+            if (isAdvancedOptionsVisible()) {
+                closeAdvancedOptions()
+            } else {
+                setControlsVisible(!binding.controlsOverlay.isShown)
+            }
         }
 
         binding.backButton.setOnClickListener { callbacks?.onExitPlayerRequested() }
         binding.playPauseButton.setOnClickListener { togglePlayback() }
-        binding.seekBackButton.setOnClickListener { seekBy(-10_000L) }
-        binding.seekForwardButton.setOnClickListener { seekBy(10_000L) }
+        binding.restartButton.setOnClickListener { restartCurrentVideo() }
+        binding.stopButton.setOnClickListener { stopPlayback() }
+        binding.progressContainer.setOnClickListener { handleProgressTap() }
+        binding.optionsButton.setOnClickListener { openAdvancedOptions() }
+        binding.advancedBackButton.setOnClickListener { closeAdvancedOptions() }
         binding.previousButton.setOnClickListener { moveToPrevious() }
         binding.nextButton.setOnClickListener { moveToNext() }
-        binding.restartButton.setOnClickListener { restartCurrentVideo() }
-        binding.volumeDownButton.setOnClickListener { adjustVolume(AudioManager.ADJUST_LOWER) }
-        binding.volumeUpButton.setOnClickListener { adjustVolume(AudioManager.ADJUST_RAISE) }
-        binding.libraryButton.setOnClickListener { callbacks?.onExitPlayerRequested() }
+
+        updatePlayPauseLabel()
+        updateNavigationButtons()
     }
 
     private fun observeQueue() {
@@ -268,6 +304,9 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
 
     private fun playVideo(item: VideoItem) {
         currentItem = item
+        mainSelection = MainControl.PLAY_PAUSE
+        resetProgressTapGesture()
+        closeAdvancedOptions(notifyFrame = false)
         binding.titleText.text = item.displayName
         binding.errorText.visibility = View.GONE
         lifecycleScope.launch {
@@ -302,26 +341,69 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
         if (exoPlayer.isPlaying) {
             exoPlayer.pause()
         } else {
+            val duration = exoPlayer.duration.takeIf { it > 0L } ?: 0L
+            val nearEnd = duration > 0L &&
+                exoPlayer.currentPosition >= (duration - PLAYBACK_RESTART_THRESHOLD_MS).coerceAtLeast(0L)
+            if (exoPlayer.playbackState == Player.STATE_ENDED || nearEnd) {
+                exoPlayer.seekTo(0L)
+            }
             exoPlayer.play()
         }
         setControlsVisible(true)
     }
 
     private fun restartCurrentVideo() {
+        resetProgressTapGesture()
         player?.seekTo(0L)
         player?.playWhenReady = true
         setControlsVisible(true)
     }
 
-    private fun seekBy(deltaMs: Long) {
-        val exoPlayer = player ?: return
-        exoPlayer.seekTo((exoPlayer.currentPosition + deltaMs).coerceAtLeast(0L))
-        setControlsVisible(true)
+    private fun stopPlayback() {
+        resetProgressTapGesture()
+        player?.pause()
+        player?.seekTo(0L)
+        updatePositionViews()
+        setControlsVisible(true, keepVisible = true)
+    }
+
+    private fun handleProgressTap() {
+        val now = SystemClock.elapsedRealtime()
+        if (lastProgressTapAt > 0L && now - lastProgressTapAt <= PROGRESS_DOUBLE_TAP_WINDOW_MS) {
+            uiHandler.removeCallbacks(progressForwardRunnable)
+            seekBy(-PROGRESS_SEEK_MS)
+            resetProgressTapGesture()
+            setControlsVisible(true, keepVisible = true)
+            return
+        }
+
+        lastProgressTapAt = now
+        uiHandler.removeCallbacks(progressForwardRunnable)
+        uiHandler.postDelayed(progressForwardRunnable, PROGRESS_DOUBLE_TAP_WINDOW_MS)
+        setControlsVisible(true, keepVisible = true)
+    }
+
+    private fun applyDeferredForwardSeek() {
+        lastProgressForwardDelta = seekBy(PROGRESS_SEEK_MS)
+    }
+
+    private fun seekBy(deltaMs: Long): Long {
+        val exoPlayer = player ?: return 0L
+        val start = exoPlayer.currentPosition.coerceAtLeast(0L)
+        val duration = exoPlayer.duration.takeIf { it > 0L }
+        val target = if (duration != null) {
+            (start + deltaMs).coerceIn(0L, duration)
+        } else {
+            (start + deltaMs).coerceAtLeast(0L)
+        }
+        exoPlayer.seekTo(target)
+        updatePositionViews()
+        return target - start
     }
 
     private fun adjustVolume(direction: Int) {
         audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, AudioManager.FLAG_SHOW_UI)
-        setControlsVisible(true)
+        setControlsVisible(true, keepVisible = true)
     }
 
     private fun updateNavigationButtons() {
@@ -330,7 +412,16 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
     }
 
     private fun updatePlayPauseLabel() {
-        binding.playPauseButton.text = if (player?.isPlaying == true) "Pause" else "Play"
+        val isPlaying = player?.isPlaying == true
+        if (isPlaying) {
+            binding.playPauseButton.text = ""
+            binding.playPauseButton.icon = ContextCompat.getDrawable(requireContext(), R.drawable.ic_pause)
+            binding.playPauseButton.iconGravity = MaterialButton.ICON_GRAVITY_TEXT_START
+            binding.playPauseButton.iconPadding = 0
+        } else {
+            binding.playPauseButton.icon = null
+            binding.playPauseButton.text = PLAY_SYMBOL
+        }
     }
 
     private fun updatePositionViews() {
@@ -338,6 +429,11 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
         val currentPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
         val duration = exoPlayer.duration.takeIf { it > 0L } ?: 0L
         binding.positionText.text = "${formatDuration(currentPosition)} / ${formatDuration(duration)}"
+        binding.playbackProgress.progress = if (duration > 0L) {
+            ((currentPosition * PROGRESS_MAX) / duration).toInt()
+        } else {
+            0
+        }
         (activity as? MainActivity)?.binocularRenderer?.notifyFrameChanged()
     }
 
@@ -359,10 +455,14 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
     }
 
     private fun setControlsVisible(visible: Boolean, keepVisible: Boolean = false) {
+        if (!visible) {
+            closeAdvancedOptions(notifyFrame = false)
+            resetProgressTapGesture()
+        }
         binding.controlsOverlay.visibility = if (visible) View.VISIBLE else View.GONE
         if (!keepVisible && visible && player?.isPlaying == true) {
             uiHandler.removeCallbacks(controlsHideRunnable)
-            uiHandler.postDelayed(controlsHideRunnable, 3000L)
+            uiHandler.postDelayed(controlsHideRunnable, CONTROL_HIDE_DELAY_MS)
         } else {
             uiHandler.removeCallbacks(controlsHideRunnable)
         }
@@ -374,84 +474,127 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
         (activity as? MainActivity)?.binocularRenderer?.notifyFrameChanged()
     }
 
-    private fun navigate(current: PlayerSelection, direction: TempleDirection): PlayerSelection {
+    private fun openAdvancedOptions() {
+        advancedSelection = AdvancedControl.BACK
+        binding.advancedOptionsOverlay.visibility = View.VISIBLE
+        resetProgressTapGesture()
+        setControlsVisible(true, keepVisible = true)
+    }
+
+    private fun closeAdvancedOptions(notifyFrame: Boolean = true) {
+        if (binding.advancedOptionsOverlay.visibility != View.VISIBLE) return
+        binding.advancedOptionsOverlay.visibility = View.GONE
+        advancedSelection = AdvancedControl.BACK
+        if (binding.controlsOverlay.visibility == View.VISIBLE) {
+            applySelection()
+        }
+        if (notifyFrame) {
+            (activity as? MainActivity)?.binocularRenderer?.notifyFrameChanged()
+        }
+    }
+
+    private fun navigateMain(current: MainControl, direction: TempleDirection): MainControl {
         return when (current) {
-            PlayerSelection.BACK -> when (direction) {
-                TempleDirection.DOWN -> PlayerSelection.PLAY_PAUSE
+            MainControl.BACK -> when (direction) {
+                TempleDirection.RIGHT -> MainControl.PLAY_PAUSE
                 else -> current
             }
-            PlayerSelection.PREVIOUS -> when (direction) {
-                TempleDirection.RIGHT -> PlayerSelection.SEEK_BACK
-                TempleDirection.DOWN -> PlayerSelection.RESTART
-                TempleDirection.UP -> PlayerSelection.BACK
+            MainControl.PLAY_PAUSE -> when (direction) {
+                TempleDirection.LEFT -> MainControl.BACK
+                TempleDirection.RIGHT -> MainControl.RESTART
                 else -> current
             }
-            PlayerSelection.SEEK_BACK -> when (direction) {
-                TempleDirection.LEFT -> PlayerSelection.PREVIOUS
-                TempleDirection.RIGHT -> PlayerSelection.PLAY_PAUSE
-                TempleDirection.DOWN -> PlayerSelection.VOLUME_DOWN
-                TempleDirection.UP -> PlayerSelection.BACK
-            }
-            PlayerSelection.PLAY_PAUSE -> when (direction) {
-                TempleDirection.LEFT -> PlayerSelection.SEEK_BACK
-                TempleDirection.RIGHT -> PlayerSelection.SEEK_FORWARD
-                TempleDirection.DOWN -> PlayerSelection.VOLUME_UP
-                TempleDirection.UP -> PlayerSelection.BACK
-            }
-            PlayerSelection.SEEK_FORWARD -> when (direction) {
-                TempleDirection.LEFT -> PlayerSelection.PLAY_PAUSE
-                TempleDirection.RIGHT -> PlayerSelection.NEXT
-                TempleDirection.DOWN -> PlayerSelection.LIBRARY
-                TempleDirection.UP -> PlayerSelection.BACK
-            }
-            PlayerSelection.NEXT -> when (direction) {
-                TempleDirection.LEFT -> PlayerSelection.SEEK_FORWARD
-                TempleDirection.DOWN -> PlayerSelection.LIBRARY
-                TempleDirection.UP -> PlayerSelection.BACK
+            MainControl.RESTART -> when (direction) {
+                TempleDirection.LEFT -> MainControl.PLAY_PAUSE
+                TempleDirection.RIGHT -> MainControl.STOP
                 else -> current
             }
-            PlayerSelection.RESTART -> when (direction) {
-                TempleDirection.RIGHT -> PlayerSelection.VOLUME_DOWN
-                TempleDirection.UP -> PlayerSelection.PREVIOUS
+            MainControl.STOP -> when (direction) {
+                TempleDirection.LEFT -> MainControl.RESTART
+                TempleDirection.RIGHT -> MainControl.PROGRESS
                 else -> current
             }
-            PlayerSelection.VOLUME_DOWN -> when (direction) {
-                TempleDirection.LEFT -> PlayerSelection.RESTART
-                TempleDirection.RIGHT -> PlayerSelection.VOLUME_UP
-                TempleDirection.UP -> PlayerSelection.SEEK_BACK
+            MainControl.PROGRESS -> when (direction) {
+                TempleDirection.LEFT -> MainControl.STOP
+                TempleDirection.RIGHT -> MainControl.OPTIONS
                 else -> current
             }
-            PlayerSelection.VOLUME_UP -> when (direction) {
-                TempleDirection.LEFT -> PlayerSelection.VOLUME_DOWN
-                TempleDirection.RIGHT -> PlayerSelection.LIBRARY
-                TempleDirection.UP -> PlayerSelection.PLAY_PAUSE
+            MainControl.OPTIONS -> when (direction) {
+                TempleDirection.LEFT -> MainControl.PROGRESS
                 else -> current
             }
-            PlayerSelection.LIBRARY -> when (direction) {
-                TempleDirection.LEFT -> PlayerSelection.VOLUME_UP
-                TempleDirection.UP -> PlayerSelection.SEEK_FORWARD
+        }
+    }
+
+    private fun navigateAdvanced(current: AdvancedControl, direction: TempleDirection): AdvancedControl {
+        return when (current) {
+            AdvancedControl.BACK -> when (direction) {
+                TempleDirection.DOWN -> AdvancedControl.PREVIOUS
+                else -> current
+            }
+            AdvancedControl.PREVIOUS -> when (direction) {
+                TempleDirection.UP -> AdvancedControl.BACK
+                TempleDirection.DOWN -> AdvancedControl.NEXT
+                else -> current
+            }
+            AdvancedControl.NEXT -> when (direction) {
+                TempleDirection.UP -> AdvancedControl.PREVIOUS
                 else -> current
             }
         }
     }
 
     private fun applySelection() {
-        val selectedView = selectionView(selection)
+        normalizeAdvancedSelection()
+        val advancedVisible = isAdvancedOptionsVisible()
         listOf(
-            binding.backButton,
-            binding.previousButton,
-            binding.seekBackButton,
-            binding.playPauseButton,
-            binding.seekForwardButton,
-            binding.nextButton,
-            binding.restartButton,
-            binding.volumeDownButton,
-            binding.volumeUpButton,
-            binding.libraryButton,
-        ).forEach { button ->
-            styleButton(button, button === selectedView)
+            binding.backButton to (mainSelection == MainControl.BACK && !advancedVisible),
+            binding.playPauseButton to (mainSelection == MainControl.PLAY_PAUSE && !advancedVisible),
+            binding.restartButton to (mainSelection == MainControl.RESTART && !advancedVisible),
+            binding.stopButton to (mainSelection == MainControl.STOP && !advancedVisible),
+            binding.optionsButton to (mainSelection == MainControl.OPTIONS && !advancedVisible),
+        ).forEach { (button, selected) ->
+            styleButton(button, selected)
         }
-        selectedView?.requestFocus()
+        styleProgressContainer(mainSelection == MainControl.PROGRESS && !advancedVisible)
+
+        listOf(
+            binding.advancedBackButton to (advancedSelection == AdvancedControl.BACK && advancedVisible),
+            binding.previousButton to (advancedSelection == AdvancedControl.PREVIOUS && advancedVisible),
+            binding.nextButton to (advancedSelection == AdvancedControl.NEXT && advancedVisible),
+        ).forEach { (button, selected) ->
+            styleButton(button, selected)
+        }
+
+        if (advancedVisible) {
+            selectionView(advancedSelection)?.requestFocus()
+        } else {
+            selectionView(mainSelection)?.requestFocus()
+        }
+    }
+
+    private fun normalizeAdvancedSelection() {
+        advancedSelection = when (advancedSelection) {
+            AdvancedControl.PREVIOUS -> {
+                if (binding.previousButton.isEnabled) {
+                    AdvancedControl.PREVIOUS
+                } else if (binding.nextButton.isEnabled) {
+                    AdvancedControl.NEXT
+                } else {
+                    AdvancedControl.BACK
+                }
+            }
+            AdvancedControl.NEXT -> {
+                if (binding.nextButton.isEnabled) {
+                    AdvancedControl.NEXT
+                } else if (binding.previousButton.isEnabled) {
+                    AdvancedControl.PREVIOUS
+                } else {
+                    AdvancedControl.BACK
+                }
+            }
+            AdvancedControl.BACK -> AdvancedControl.BACK
+        }
     }
 
     private fun styleButton(button: MaterialButton, selected: Boolean) {
@@ -471,23 +614,42 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
         button.strokeWidth = if (selected) 4 else 2
         button.strokeColor = ColorStateList.valueOf(strokeColor)
         button.setTextColor(textColor)
+        button.iconTint = ColorStateList.valueOf(textColor)
         button.scaleX = if (selected) 1.06f else 1f
         button.scaleY = if (selected) 1.06f else 1f
+        button.alpha = if (button.isEnabled) 1f else 0.45f
         button.isActivated = selected
     }
 
-    private fun selectionView(selection: PlayerSelection): MaterialButton? {
+    private fun styleProgressContainer(selected: Boolean) {
+        binding.progressContainer.isActivated = selected
+        binding.progressContainer.scaleX = if (selected) 1.03f else 1f
+        binding.progressContainer.scaleY = if (selected) 1.03f else 1f
+        binding.positionText.setTextColor(
+            ContextCompat.getColor(
+                requireContext(),
+                if (selected) R.color.accent_cyan else R.color.text_primary,
+            )
+        )
+        binding.playbackProgress.alpha = if (selected) 1f else 0.9f
+    }
+
+    private fun selectionView(selection: MainControl): View? {
         return when (selection) {
-            PlayerSelection.BACK -> binding.backButton
-            PlayerSelection.PREVIOUS -> binding.previousButton
-            PlayerSelection.SEEK_BACK -> binding.seekBackButton
-            PlayerSelection.PLAY_PAUSE -> binding.playPauseButton
-            PlayerSelection.SEEK_FORWARD -> binding.seekForwardButton
-            PlayerSelection.NEXT -> binding.nextButton
-            PlayerSelection.RESTART -> binding.restartButton
-            PlayerSelection.VOLUME_DOWN -> binding.volumeDownButton
-            PlayerSelection.VOLUME_UP -> binding.volumeUpButton
-            PlayerSelection.LIBRARY -> binding.libraryButton
+            MainControl.BACK -> binding.backButton
+            MainControl.PLAY_PAUSE -> binding.playPauseButton
+            MainControl.RESTART -> binding.restartButton
+            MainControl.STOP -> binding.stopButton
+            MainControl.PROGRESS -> binding.progressContainer
+            MainControl.OPTIONS -> binding.optionsButton
+        }
+    }
+
+    private fun selectionView(selection: AdvancedControl): View? {
+        return when (selection) {
+            AdvancedControl.BACK -> binding.advancedBackButton
+            AdvancedControl.PREVIOUS -> binding.previousButton
+            AdvancedControl.NEXT -> binding.nextButton
         }
     }
 
@@ -518,11 +680,11 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
                 true
             }
             KeyEvent.KEYCODE_MEDIA_REWIND -> {
-                seekBy(-10_000L)
+                seekBy(-PROGRESS_SEEK_MS)
                 true
             }
             KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
-                seekBy(10_000L)
+                seekBy(PROGRESS_SEEK_MS)
                 true
             }
             KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
@@ -542,14 +704,33 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
                 true
             }
             KeyEvent.KEYCODE_BACK -> {
-                callbacks?.onExitPlayerRequested()
+                if (isAdvancedOptionsVisible()) {
+                    closeAdvancedOptions()
+                } else {
+                    callbacks?.onExitPlayerRequested()
+                }
                 true
             }
             else -> false
         }
     }
 
+    private fun resetProgressTapGesture() {
+        uiHandler.removeCallbacks(progressForwardRunnable)
+        lastProgressTapAt = 0L
+        lastProgressForwardDelta = 0L
+    }
+
+    private fun isAdvancedOptionsVisible(): Boolean = binding.advancedOptionsOverlay.visibility == View.VISIBLE
+
     companion object {
+        private const val CONTROL_HIDE_DELAY_MS = 3000L
+        private const val PLAYBACK_RESTART_THRESHOLD_MS = 1000L
+        private const val PROGRESS_DOUBLE_TAP_WINDOW_MS = 350L
+        private const val PROGRESS_SEEK_MS = 10_000L
+        private const val PROGRESS_MAX = 1000L
+        private const val PLAY_SYMBOL = "\u25B6"
+
         fun newInstance(): PlayerFragment = PlayerFragment()
     }
 }

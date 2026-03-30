@@ -20,7 +20,6 @@ import com.x3player.glasses.R
 import com.x3player.glasses.TempleDirection
 import com.x3player.glasses.TempleNavigationHandler
 import com.x3player.glasses.X3PlayerApplication
-import com.x3player.glasses.data.LibraryFilter
 import com.x3player.glasses.data.VideoItem
 import com.x3player.glasses.databinding.FragmentLibraryBinding
 import kotlinx.coroutines.launch
@@ -32,10 +31,9 @@ class LibraryFragment : Fragment(), TempleNavigationHandler {
     }
 
     private sealed class LibrarySelection {
-        data class Filters(val index: Int) : LibrarySelection()
-        data class Actions(val index: Int) : LibrarySelection()
-        data class Settings(val index: Int) : LibrarySelection()
+        object OptionsButton : LibrarySelection()
         data class Video(val index: Int) : LibrarySelection()
+        data class Overlay(val index: Int) : LibrarySelection()
     }
 
     private var _binding: FragmentLibraryBinding? = null
@@ -44,6 +42,7 @@ class LibraryFragment : Fragment(), TempleNavigationHandler {
     private var renderingState = false
     private var latestItems: List<VideoItem> = emptyList()
     private var selection: LibrarySelection = LibrarySelection.Video(0)
+    private var lastListSelection: LibrarySelection = LibrarySelection.Video(0)
 
     private val viewModel: LibraryViewModel by viewModels {
         val appContainer = (requireActivity().application as X3PlayerApplication).appContainer
@@ -73,15 +72,9 @@ class LibraryFragment : Fragment(), TempleNavigationHandler {
         binding.videoList.layoutManager = LinearLayoutManager(requireContext())
         binding.videoList.adapter = adapter
 
-        binding.filterToggleGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
-            if (!isChecked || renderingState) return@addOnButtonCheckedListener
-            when (checkedId) {
-                binding.filterAllButton.id -> viewModel.setFilter(LibraryFilter.ALL)
-                binding.filterMoviesButton.id -> viewModel.setFilter(LibraryFilter.MOVIES)
-                binding.filterDownloadsButton.id -> viewModel.setFilter(LibraryFilter.DOWNLOADS)
-            }
-        }
-
+        binding.optionsButton.setOnClickListener { openOptionsOverlay() }
+        binding.overlayBackButton.setOnClickListener { closeOptionsOverlay() }
+        binding.filterButton.setOnClickListener { viewModel.cycleFilter() }
         binding.sortButton.setOnClickListener { viewModel.cycleSort() }
         binding.refreshButton.setOnClickListener { viewModel.refresh() }
         binding.autoResumeCheckbox.setOnCheckedChangeListener { _, isChecked ->
@@ -122,10 +115,9 @@ class LibraryFragment : Fragment(), TempleNavigationHandler {
 
     override fun onTempleNavigate(direction: TempleDirection): Boolean {
         selection = when (val current = normalizeSelection(selection, latestItems)) {
+            is LibrarySelection.OptionsButton -> navigateFromOptionsButton(direction)
             is LibrarySelection.Video -> navigateFromVideo(current, direction)
-            is LibrarySelection.Settings -> navigateFromSettings(current, direction)
-            is LibrarySelection.Actions -> navigateFromActions(current, direction)
-            is LibrarySelection.Filters -> navigateFromFilters(current, direction)
+            is LibrarySelection.Overlay -> navigateFromOverlay(current, direction)
         }
         applySelection()
         return true
@@ -133,13 +125,17 @@ class LibraryFragment : Fragment(), TempleNavigationHandler {
 
     override fun onTempleTap(): Boolean {
         when (val current = normalizeSelection(selection, latestItems)) {
+            is LibrarySelection.OptionsButton -> {
+                openOptionsOverlay()
+                return true
+            }
             is LibrarySelection.Video -> {
                 callbacks?.onVideoSelected(latestItems, current.index)
                 return true
             }
-            is LibrarySelection.Filters -> selectionViewFor(current)?.performClick()
-            is LibrarySelection.Actions -> selectionViewFor(current)?.performClick()
-            is LibrarySelection.Settings -> selectionViewFor(current)?.performClick()
+            is LibrarySelection.Overlay -> {
+                selectionViewFor(current)?.performClick()
+            }
         }
         applySelection()
         return true
@@ -153,11 +149,7 @@ class LibraryFragment : Fragment(), TempleNavigationHandler {
     private fun render(state: LibraryUiState) {
         renderingState = true
         val previousSelection = selection
-        when (state.filter) {
-            LibraryFilter.ALL -> binding.filterToggleGroup.check(binding.filterAllButton.id)
-            LibraryFilter.MOVIES -> binding.filterToggleGroup.check(binding.filterMoviesButton.id)
-            LibraryFilter.DOWNLOADS -> binding.filterToggleGroup.check(binding.filterDownloadsButton.id)
-        }
+        binding.filterButton.text = "Location: ${state.filter.label}"
         binding.sortButton.text = "Sort: ${state.sort.label}"
         binding.autoResumeCheckbox.isChecked = state.autoResume
         binding.reopenCheckbox.isChecked = state.reopenLastVideoOnLaunch
@@ -173,56 +165,67 @@ class LibraryFragment : Fragment(), TempleNavigationHandler {
         }
     }
 
+    private fun navigateFromOptionsButton(direction: TempleDirection): LibrarySelection {
+        return when (direction) {
+            TempleDirection.DOWN -> if (latestItems.isNotEmpty()) LibrarySelection.Video(0) else LibrarySelection.OptionsButton
+            TempleDirection.UP,
+            TempleDirection.LEFT,
+            TempleDirection.RIGHT -> LibrarySelection.OptionsButton
+        }
+    }
+
     private fun navigateFromVideo(current: LibrarySelection.Video, direction: TempleDirection): LibrarySelection {
         return when (direction) {
             TempleDirection.DOWN -> {
                 if (current.index < latestItems.lastIndex) LibrarySelection.Video(current.index + 1) else current
             }
             TempleDirection.UP -> {
-                if (current.index > 0) LibrarySelection.Video(current.index - 1) else LibrarySelection.Settings(0)
+                if (current.index > 0) LibrarySelection.Video(current.index - 1) else LibrarySelection.OptionsButton
             }
             TempleDirection.LEFT,
             TempleDirection.RIGHT -> current
         }
     }
 
-    private fun navigateFromSettings(current: LibrarySelection.Settings, direction: TempleDirection): LibrarySelection {
+    private fun navigateFromOverlay(current: LibrarySelection.Overlay, direction: TempleDirection): LibrarySelection {
         return when (direction) {
-            TempleDirection.LEFT -> LibrarySelection.Settings((current.index - 1).coerceAtLeast(0))
-            TempleDirection.RIGHT -> LibrarySelection.Settings((current.index + 1).coerceAtMost(1))
-            TempleDirection.DOWN -> if (latestItems.isNotEmpty()) LibrarySelection.Video(0) else current
-            TempleDirection.UP -> LibrarySelection.Actions(0)
-        }
-    }
-
-    private fun navigateFromActions(current: LibrarySelection.Actions, direction: TempleDirection): LibrarySelection {
-        return when (direction) {
-            TempleDirection.LEFT -> LibrarySelection.Actions((current.index - 1).coerceAtLeast(0))
-            TempleDirection.RIGHT -> LibrarySelection.Actions((current.index + 1).coerceAtMost(1))
-            TempleDirection.DOWN -> LibrarySelection.Settings(0)
-            TempleDirection.UP -> LibrarySelection.Filters(0)
-        }
-    }
-
-    private fun navigateFromFilters(current: LibrarySelection.Filters, direction: TempleDirection): LibrarySelection {
-        return when (direction) {
-            TempleDirection.LEFT -> LibrarySelection.Filters((current.index - 1).coerceAtLeast(0))
-            TempleDirection.RIGHT -> LibrarySelection.Filters((current.index + 1).coerceAtMost(2))
-            TempleDirection.DOWN -> LibrarySelection.Actions(0)
-            TempleDirection.UP -> current
+            TempleDirection.UP -> LibrarySelection.Overlay((current.index - 1).coerceAtLeast(0))
+            TempleDirection.DOWN -> LibrarySelection.Overlay((current.index + 1).coerceAtMost(5))
+            TempleDirection.LEFT,
+            TempleDirection.RIGHT -> current
         }
     }
 
     private fun normalizeSelection(selection: LibrarySelection, items: List<VideoItem>): LibrarySelection {
         return when (selection) {
+            is LibrarySelection.Overlay -> {
+                if (isOptionsOverlayVisible()) {
+                    LibrarySelection.Overlay(selection.index.coerceIn(0, 5))
+                } else {
+                    normalizeListSelection(lastListSelection, items)
+                }
+            }
+            else -> normalizeListSelection(selection, items)
+        }
+    }
+
+    private fun normalizeListSelection(selection: LibrarySelection, items: List<VideoItem>): LibrarySelection {
+        return when (selection) {
+            is LibrarySelection.OptionsButton -> LibrarySelection.OptionsButton
             is LibrarySelection.Video -> {
                 if (items.isNotEmpty()) {
                     LibrarySelection.Video(selection.index.coerceIn(0, items.lastIndex))
                 } else {
-                    LibrarySelection.Actions(1)
+                    LibrarySelection.OptionsButton
                 }
             }
-            else -> selection
+            is LibrarySelection.Overlay -> {
+                if (items.isNotEmpty()) {
+                    LibrarySelection.Video(0)
+                } else {
+                    LibrarySelection.OptionsButton
+                }
+            }
         }
     }
 
@@ -230,17 +233,23 @@ class LibraryFragment : Fragment(), TempleNavigationHandler {
         val current = normalizeSelection(selection, latestItems)
         selection = current
         when (current) {
+            is LibrarySelection.OptionsButton -> {
+                adapter.setSelectedIndex(-1)
+                styleButton(binding.optionsButton, true)
+                clearOverlaySelection()
+                binding.optionsButton.requestFocus()
+            }
             is LibrarySelection.Video -> {
                 adapter.setSelectedIndex(current.index)
+                styleButton(binding.optionsButton, false)
+                clearOverlaySelection()
                 focusVideoItem(current.index)
-                highlightControls(null)
             }
-            is LibrarySelection.Filters,
-            is LibrarySelection.Actions,
-            is LibrarySelection.Settings -> {
+            is LibrarySelection.Overlay -> {
                 adapter.setSelectedIndex(-1)
+                styleButton(binding.optionsButton, false)
                 val target = selectionViewFor(current)
-                highlightControls(target)
+                highlightOverlayControls(target)
                 target?.requestFocus()
             }
         }
@@ -256,11 +265,10 @@ class LibraryFragment : Fragment(), TempleNavigationHandler {
         }
     }
 
-    private fun highlightControls(selected: View?) {
+    private fun highlightOverlayControls(selected: View?) {
         val actionViews = listOf<View>(
-            binding.filterAllButton,
-            binding.filterMoviesButton,
-            binding.filterDownloadsButton,
+            binding.overlayBackButton,
+            binding.filterButton,
             binding.sortButton,
             binding.refreshButton,
             binding.autoResumeCheckbox,
@@ -276,6 +284,10 @@ class LibraryFragment : Fragment(), TempleNavigationHandler {
                 is CheckBox -> styleCheckBox(view, isSelected)
             }
         }
+    }
+
+    private fun clearOverlaySelection() {
+        highlightOverlayControls(null)
     }
 
     private fun styleButton(button: MaterialButton, selected: Boolean) {
@@ -313,22 +325,37 @@ class LibraryFragment : Fragment(), TempleNavigationHandler {
 
     private fun selectionViewFor(selection: LibrarySelection): View? {
         return when (selection) {
-            is LibrarySelection.Filters -> when (selection.index) {
-                0 -> binding.filterAllButton
-                1 -> binding.filterMoviesButton
-                else -> binding.filterDownloadsButton
-            }
-            is LibrarySelection.Actions -> when (selection.index) {
-                0 -> binding.sortButton
-                else -> binding.refreshButton
-            }
-            is LibrarySelection.Settings -> when (selection.index) {
-                0 -> binding.autoResumeCheckbox
+            is LibrarySelection.OptionsButton -> binding.optionsButton
+            is LibrarySelection.Video -> null
+            is LibrarySelection.Overlay -> when (selection.index) {
+                0 -> binding.overlayBackButton
+                1 -> binding.filterButton
+                2 -> binding.sortButton
+                3 -> binding.refreshButton
+                4 -> binding.autoResumeCheckbox
                 else -> binding.reopenCheckbox
             }
-            is LibrarySelection.Video -> null
         }
     }
+
+    private fun openOptionsOverlay() {
+        if (isOptionsOverlayVisible()) return
+        lastListSelection = normalizeListSelection(selection, latestItems)
+        binding.optionsOverlay.visibility = View.VISIBLE
+        selection = LibrarySelection.Overlay(0)
+        applySelection()
+        (activity as? MainActivity)?.binocularRenderer?.notifyFrameChanged()
+    }
+
+    private fun closeOptionsOverlay() {
+        if (!isOptionsOverlayVisible()) return
+        binding.optionsOverlay.visibility = View.GONE
+        selection = normalizeListSelection(lastListSelection, latestItems)
+        applySelection()
+        (activity as? MainActivity)?.binocularRenderer?.notifyFrameChanged()
+    }
+
+    private fun isOptionsOverlayVisible(): Boolean = binding.optionsOverlay.visibility == View.VISIBLE
 
     companion object {
         fun newInstance(): LibraryFragment = LibraryFragment()
