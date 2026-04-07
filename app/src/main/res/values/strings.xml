@@ -28,4 +28,18 @@
     <string name="volume_down">Vol-</string>
     <string name="volume_up">Vol+</string>
     <string name="library">Library</string>
+    <string name="captions">Captions</string>
+    <string name="subtitles_title">Subtitles</string>
+    <string name="subtitles_subtitle">Upload local subtitle files and pick the active track.</string>
+    <string name="subtitles_none">None</string>
+    <string name="subtitles_hint">Double tap to close this menu.</string>
+    <string name="subtitles_current_suffix"> (Current)</string>
+    <string name="upload">Upload</string>
+    <string name="subtitle_upload_failed">Subtitle upload failed.</string>
+    <string name="subtitle_upload_unsupported">Use SRT, VTT, SSA, ASS, or TTML subtitle files.</string>
+    <string name="subtitle_picker_unavailable">No system file picker is available on these glasses.</string>
+    <string name="subtitle_import_title">Upload Subtitle</string>
+    <string name="subtitle_import_subtitle">Pick a local subtitle file from Documents, Download, or Movies.</string>
+    <string name="subtitle_import_hint">Tap to import. Double tap to go back.</string>
+    <string name="subtitle_import_empty">No subtitle files were found in Documents, Download, or Movies.</string>
 </resources>

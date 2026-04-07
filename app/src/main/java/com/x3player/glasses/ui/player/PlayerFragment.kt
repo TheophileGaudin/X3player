@@ -18,12 +18,15 @@ import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import com.google.android.material.button.MaterialButton
+import com.x3player.glasses.data.LocalSubtitleCandidate
+import com.x3player.glasses.data.LocalSubtitleImportScanner
 import com.x3player.glasses.MainActivity
 import com.x3player.glasses.PlaybackQueueViewModel
 import com.x3player.glasses.R
@@ -32,11 +35,15 @@ import com.x3player.glasses.TempleNavigationHandler
 import com.x3player.glasses.X3PlayerApplication
 import com.x3player.glasses.data.PlaybackProgressStore
 import com.x3player.glasses.data.SettingsRepository
+import com.x3player.glasses.data.SubtitleRepository
+import com.x3player.glasses.data.UploadedSubtitle
 import com.x3player.glasses.data.VideoItem
+import com.x3player.glasses.data.VideoSubtitleState
 import com.x3player.glasses.databinding.FragmentPlayerBinding
 import com.x3player.glasses.util.formatDuration
 import com.x3player.glasses.util.resolveResumePosition
 import com.x3player.glasses.util.shouldMarkCompleted
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -53,6 +60,7 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
         RESTART,
         STOP,
         PROGRESS,
+        CAPTIONS,
         OPTIONS,
     }
 
@@ -68,6 +76,7 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
     private val playbackQueueViewModel: PlaybackQueueViewModel by activityViewModels()
     private lateinit var playbackProgressStore: PlaybackProgressStore
     private lateinit var settingsRepository: SettingsRepository
+    private lateinit var subtitleRepository: SubtitleRepository
     private lateinit var audioManager: AudioManager
 
     private var callbacks: Callbacks? = null
@@ -76,12 +85,29 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
     private var currentItem: VideoItem? = null
     private var mainSelection: MainControl = MainControl.PLAY_PAUSE
     private var advancedSelection: AdvancedControl = AdvancedControl.BACK
+    private var subtitleState: VideoSubtitleState = VideoSubtitleState()
+    private var subtitleMenuSelectionIndex = SUBTITLE_NONE_INDEX
+    private var pendingSubtitleMenuSelectionId: Long? = null
+    private var subtitleImportCandidates: List<LocalSubtitleCandidate> = emptyList()
+    private var subtitleImportSelectionIndex = 0
+    private var appliedSubtitleVideoId: Long? = null
+    private var appliedSubtitleId: Long? = null
     private var lastProgressTapAt = 0L
-    private var lastProgressForwardDelta = 0L
+    private var lastSubtitleMenuTapAt = 0L
+    private var pendingSubtitleMenuActionIndex: Int? = null
+
+    private var subtitleObserverJob: Job? = null
+    private var playbackPreparationJob: Job? = null
+    private var subtitleImportLoadJob: Job? = null
+
+    private val uploadedSubtitleButtons = linkedMapOf<Long, MaterialButton>()
+    private val subtitleImportButtons = mutableListOf<MaterialButton>()
+    private lateinit var subtitleImportScanner: LocalSubtitleImportScanner
 
     private val uiHandler = Handler(Looper.getMainLooper())
     private val controlsHideRunnable = Runnable { setControlsVisible(false) }
     private val progressForwardRunnable = Runnable { applyDeferredForwardSeek() }
+    private val subtitleMenuActionRunnable = Runnable { performPendingSubtitleMenuAction() }
     private val positionUpdateRunnable = object : Runnable {
         override fun run() {
             updatePositionViews()
@@ -127,6 +153,8 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
         val appContainer = (requireActivity().application as X3PlayerApplication).appContainer
         playbackProgressStore = appContainer.playbackProgressStore
         settingsRepository = appContainer.settingsRepository
+        subtitleRepository = appContainer.subtitleRepository
+        subtitleImportScanner = LocalSubtitleImportScanner(context.applicationContext)
     }
 
     override fun onCreateView(
@@ -165,10 +193,19 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
         uiHandler.removeCallbacks(positionUpdateRunnable)
         uiHandler.removeCallbacks(controlsHideRunnable)
         uiHandler.removeCallbacks(progressForwardRunnable)
+        uiHandler.removeCallbacks(subtitleMenuActionRunnable)
+        subtitleObserverJob?.cancel()
+        subtitleObserverJob = null
+        playbackPreparationJob?.cancel()
+        playbackPreparationJob = null
+        subtitleImportLoadJob?.cancel()
+        subtitleImportLoadJob = null
         savePlaybackProgress()
         releasePlayer()
         requireActivity().window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         (activity as? MainActivity)?.binocularRenderer?.setMirrorMode(false)
+        uploadedSubtitleButtons.clear()
+        subtitleImportButtons.clear()
         _binding = null
         super.onDestroyView()
     }
@@ -183,7 +220,13 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
             setControlsVisible(true)
         }
 
-        if (isAdvancedOptionsVisible()) {
+        if (isSubtitleImportVisible()) {
+            resetSubtitleMenuTapGesture()
+            subtitleImportSelectionIndex = navigateSubtitleImportMenu(subtitleImportSelectionIndex, direction)
+        } else if (isSubtitleMenuVisible()) {
+            resetSubtitleMenuTapGesture()
+            subtitleMenuSelectionIndex = navigateSubtitleMenu(subtitleMenuSelectionIndex, direction)
+        } else if (isAdvancedOptionsVisible()) {
             advancedSelection = navigateAdvanced(advancedSelection, direction)
         } else {
             val previousSelection = mainSelection
@@ -200,6 +243,16 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
     override fun onTempleTap(): Boolean {
         if (binding.controlsOverlay.visibility != View.VISIBLE) {
             setControlsVisible(true)
+            return true
+        }
+
+        if (isSubtitleImportVisible()) {
+            handleSubtitleImportTap()
+            return true
+        }
+
+        if (isSubtitleMenuVisible()) {
+            handleSubtitleMenuTap()
             return true
         }
 
@@ -245,19 +298,21 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
                 handleKeyEvent(keyCode, event)
             }
             setOnClickListener {
-                if (isAdvancedOptionsVisible()) {
-                    closeAdvancedOptions()
-                } else {
-                    setControlsVisible(!binding.controlsOverlay.isShown)
+                when {
+                    isSubtitleImportVisible() -> closeSubtitleImportOverlay()
+                    isSubtitleMenuVisible() -> closeSubtitleMenu()
+                    isAdvancedOptionsVisible() -> closeAdvancedOptions()
+                    else -> setControlsVisible(!binding.controlsOverlay.isShown)
                 }
             }
         }
 
         binding.playerView.setOnClickListener {
-            if (isAdvancedOptionsVisible()) {
-                closeAdvancedOptions()
-            } else {
-                setControlsVisible(!binding.controlsOverlay.isShown)
+            when {
+                isSubtitleImportVisible() -> closeSubtitleImportOverlay()
+                isSubtitleMenuVisible() -> closeSubtitleMenu()
+                isAdvancedOptionsVisible() -> closeAdvancedOptions()
+                else -> setControlsVisible(!binding.controlsOverlay.isShown)
             }
         }
 
@@ -266,13 +321,18 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
         binding.restartButton.setOnClickListener { restartCurrentVideo() }
         binding.stopButton.setOnClickListener { stopPlayback() }
         binding.progressContainer.setOnClickListener { handleProgressTap() }
+        binding.captionsButton.setOnClickListener { openSubtitleMenu() }
         binding.optionsButton.setOnClickListener { openAdvancedOptions() }
         binding.advancedBackButton.setOnClickListener { closeAdvancedOptions() }
         binding.previousButton.setOnClickListener { moveToPrevious() }
         binding.nextButton.setOnClickListener { moveToNext() }
+        binding.subtitleUploadButton.setOnClickListener { openSubtitleImportOverlay() }
+        binding.subtitleNoneButton.setOnClickListener { selectSubtitle(null) }
 
         updatePlayPauseLabel()
         updateNavigationButtons()
+        renderSubtitleRows()
+        renderSubtitleImportRows()
     }
 
     private fun observeQueue() {
@@ -289,7 +349,7 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
                     }
                     updateNavigationButtons()
                     if (item.id != currentItem?.id) {
-                        playVideo(item)
+                        bindVideo(item)
                     }
                 }
             }
@@ -302,37 +362,115 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
         return resolveResumePosition(progress, settings.autoResume)
     }
 
-    private fun playVideo(item: VideoItem) {
+    private fun bindVideo(item: VideoItem) {
         currentItem = item
         mainSelection = MainControl.PLAY_PAUSE
         resetProgressTapGesture()
         closeAdvancedOptions(notifyFrame = false)
+        closeSubtitleImportOverlay(notifyFrame = false)
+        closeSubtitleMenu(notifyFrame = false)
         binding.titleText.text = item.displayName
         binding.errorText.visibility = View.GONE
-        lifecycleScope.launch {
-            settingsRepository.setLastVideoUri(item.contentUri.toString())
-            val startPosition = computeStartPosition(item)
-            val exoPlayer = player ?: return@launch
-            exoPlayer.setMediaItem(MediaItem.fromUri(item.contentUri))
-            exoPlayer.prepare()
-            if (startPosition > 0L) {
-                exoPlayer.seekTo(startPosition)
+
+        subtitleState = VideoSubtitleState()
+        subtitleImportCandidates = emptyList()
+        subtitleImportSelectionIndex = 0
+        appliedSubtitleVideoId = null
+        appliedSubtitleId = null
+        pendingSubtitleMenuSelectionId = null
+        renderSubtitleRows()
+        renderSubtitleImportRows()
+
+        subtitleObserverJob?.cancel()
+        subtitleObserverJob = viewLifecycleOwner.lifecycleScope.launch {
+            subtitleRepository.observeVideoSubtitles(item.id).collect { state ->
+                handleSubtitleState(item, state)
             }
-            exoPlayer.playWhenReady = true
-            updatePositionViews()
-            setControlsVisible(true)
         }
+    }
+
+    private fun handleSubtitleState(item: VideoItem, state: VideoSubtitleState) {
+        if (currentItem?.id != item.id) return
+
+        val currentMenuSubtitleId = subtitleIdForMenuIndex(subtitleMenuSelectionIndex)
+        subtitleState = state
+        renderSubtitleRows(currentMenuSubtitleId)
+
+        if (appliedSubtitleVideoId != item.id) {
+            preparePlayback(item, state.selectedSubtitle, initialPlayback = true)
+        } else if (appliedSubtitleId != state.selectedSubtitleId) {
+            preparePlayback(item, state.selectedSubtitle, initialPlayback = false)
+        } else {
+            (activity as? MainActivity)?.binocularRenderer?.notifyFrameChanged()
+        }
+    }
+
+    private fun preparePlayback(
+        item: VideoItem,
+        subtitle: UploadedSubtitle?,
+        initialPlayback: Boolean,
+    ) {
+        playbackPreparationJob?.cancel()
+        playbackPreparationJob = viewLifecycleOwner.lifecycleScope.launch {
+            if (currentItem?.id != item.id) return@launch
+
+            val exoPlayer = player ?: return@launch
+            val startPosition = if (initialPlayback) {
+                computeStartPosition(item)
+            } else {
+                exoPlayer.currentPosition.coerceAtLeast(0L)
+            }
+            val playWhenReady = if (initialPlayback) {
+                true
+            } else {
+                exoPlayer.playWhenReady
+            }
+
+            settingsRepository.setLastVideoUri(item.contentUri.toString())
+            exoPlayer.setMediaItem(buildMediaItem(item, subtitle), startPosition)
+            exoPlayer.prepare()
+            exoPlayer.playWhenReady = playWhenReady
+
+            appliedSubtitleVideoId = item.id
+            appliedSubtitleId = subtitle?.id
+            updatePositionViews()
+
+            if (initialPlayback) {
+                setControlsVisible(true)
+            } else {
+                setControlsVisible(true, keepVisible = true)
+            }
+        }
+    }
+
+    private fun buildMediaItem(item: VideoItem, subtitle: UploadedSubtitle?): MediaItem {
+        val builder = MediaItem.Builder()
+            .setUri(item.contentUri)
+
+        if (subtitle != null) {
+            builder.setSubtitleConfigurations(
+                listOf(
+                    MediaItem.SubtitleConfiguration.Builder(subtitle.contentUri)
+                        .setMimeType(subtitle.mimeType)
+                        .setLabel(subtitle.displayName)
+                        .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                        .build()
+                )
+            )
+        }
+
+        return builder.build()
     }
 
     private fun moveToPrevious() {
         savePlaybackProgress()
-        playbackQueueViewModel.selectPrevious()?.let { playVideo(it) }
+        playbackQueueViewModel.selectPrevious()
         updateNavigationButtons()
     }
 
     private fun moveToNext() {
         savePlaybackProgress()
-        playbackQueueViewModel.selectNext()?.let { playVideo(it) }
+        playbackQueueViewModel.selectNext()
         updateNavigationButtons()
     }
 
@@ -383,8 +521,108 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
         setControlsVisible(true, keepVisible = true)
     }
 
+    private fun handleSubtitleMenuTap() {
+        val now = SystemClock.elapsedRealtime()
+        if (pendingSubtitleMenuActionIndex != null &&
+            now - lastSubtitleMenuTapAt <= SUBTITLE_MENU_DOUBLE_TAP_WINDOW_MS
+        ) {
+            resetSubtitleMenuTapGesture()
+            if (isSubtitleImportVisible()) {
+                closeSubtitleImportOverlay()
+            } else {
+                closeSubtitleMenu()
+            }
+            return
+        }
+
+        pendingSubtitleMenuActionIndex = if (isSubtitleImportVisible()) {
+            subtitleImportSelectionIndex
+        } else {
+            subtitleMenuSelectionIndex
+        }
+        lastSubtitleMenuTapAt = now
+        uiHandler.removeCallbacks(subtitleMenuActionRunnable)
+        uiHandler.postDelayed(subtitleMenuActionRunnable, SUBTITLE_MENU_DOUBLE_TAP_WINDOW_MS)
+        setControlsVisible(true, keepVisible = true)
+    }
+
+    private fun handleSubtitleImportTap() {
+        handleSubtitleMenuTap()
+    }
+
+    private fun performPendingSubtitleMenuAction() {
+        val actionIndex = pendingSubtitleMenuActionIndex ?: return
+        resetSubtitleMenuTapGesture()
+        if (isSubtitleImportVisible()) {
+            importSubtitleCandidate(actionIndex)
+            return
+        }
+
+        when (actionIndex) {
+            SUBTITLE_UPLOAD_INDEX -> openSubtitleImportOverlay()
+            SUBTITLE_NONE_INDEX -> selectSubtitle(null)
+            else -> subtitleIdForMenuIndex(actionIndex)?.let { selectSubtitle(it) }
+        }
+    }
+
+    private fun openSubtitleImportOverlay() {
+        val item = currentItem ?: return
+        clearSubtitleMessage()
+        subtitleImportSelectionIndex = 0
+        subtitleImportCandidates = emptyList()
+        renderSubtitleImportRows()
+        binding.subtitleImportMessageText.text = getString(R.string.subtitle_import_subtitle)
+        binding.subtitleImportOverlay.visibility = View.VISIBLE
+        setControlsVisible(true, keepVisible = true)
+
+        subtitleImportLoadJob?.cancel()
+        subtitleImportLoadJob = viewLifecycleOwner.lifecycleScope.launch {
+            val candidates = subtitleImportScanner.findCandidatesFor(item)
+            subtitleImportCandidates = candidates
+            renderSubtitleImportRows()
+            binding.subtitleImportMessageText.text = if (candidates.isEmpty()) {
+                getString(R.string.subtitle_import_empty)
+            } else {
+                getString(R.string.subtitle_import_subtitle)
+            }
+            applySelection()
+        }
+    }
+
+    private fun importSubtitleCandidate(index: Int) {
+        val item = currentItem ?: return
+        val candidate = subtitleImportCandidates.getOrNull(index) ?: run {
+            setControlsVisible(true, keepVisible = true)
+            return
+        }
+
+        lifecycleScope.launch {
+            try {
+                val uploaded = subtitleRepository.addSubtitle(item.id, candidate.contentUri)
+                pendingSubtitleMenuSelectionId = uploaded.id
+                clearSubtitleMessage()
+                closeSubtitleImportOverlay(notifyFrame = false)
+            } catch (_: IllegalArgumentException) {
+                showSubtitleMessage(getString(R.string.subtitle_upload_unsupported))
+            } catch (_: Exception) {
+                showSubtitleMessage(getString(R.string.subtitle_upload_failed))
+            } finally {
+                setControlsVisible(true, keepVisible = true)
+            }
+        }
+    }
+
+    private fun selectSubtitle(subtitleId: Long?) {
+        val item = currentItem ?: return
+        clearSubtitleMessage()
+        lifecycleScope.launch {
+            subtitleRepository.selectSubtitle(item.id, subtitleId)
+        }
+        setControlsVisible(true, keepVisible = true)
+    }
+
     private fun applyDeferredForwardSeek() {
-        lastProgressForwardDelta = seekBy(PROGRESS_SEEK_MS)
+        seekBy(PROGRESS_SEEK_MS)
     }
 
     private fun seekBy(deltaMs: Long): Long {
@@ -457,10 +695,18 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
     private fun setControlsVisible(visible: Boolean, keepVisible: Boolean = false) {
         if (!visible) {
             closeAdvancedOptions(notifyFrame = false)
+            closeSubtitleImportOverlay(notifyFrame = false)
+            closeSubtitleMenu(notifyFrame = false)
             resetProgressTapGesture()
         }
         binding.controlsOverlay.visibility = if (visible) View.VISIBLE else View.GONE
-        if (!keepVisible && visible && player?.isPlaying == true) {
+        val shouldAutoHide = visible &&
+            !keepVisible &&
+            !isAdvancedOptionsVisible() &&
+            !isSubtitleImportVisible() &&
+            !isSubtitleMenuVisible() &&
+            player?.isPlaying == true
+        if (shouldAutoHide) {
             uiHandler.removeCallbacks(controlsHideRunnable)
             uiHandler.postDelayed(controlsHideRunnable, CONTROL_HIDE_DELAY_MS)
         } else {
@@ -475,6 +721,8 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
     }
 
     private fun openAdvancedOptions() {
+        closeSubtitleImportOverlay(notifyFrame = false)
+        closeSubtitleMenu(notifyFrame = false)
         advancedSelection = AdvancedControl.BACK
         binding.advancedOptionsOverlay.visibility = View.VISIBLE
         resetProgressTapGesture()
@@ -485,6 +733,50 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
         if (binding.advancedOptionsOverlay.visibility != View.VISIBLE) return
         binding.advancedOptionsOverlay.visibility = View.GONE
         advancedSelection = AdvancedControl.BACK
+        if (binding.controlsOverlay.visibility == View.VISIBLE) {
+            applySelection()
+        }
+        if (notifyFrame) {
+            (activity as? MainActivity)?.binocularRenderer?.notifyFrameChanged()
+        }
+    }
+
+    private fun openSubtitleMenu() {
+        closeSubtitleImportOverlay(notifyFrame = false)
+        closeAdvancedOptions(notifyFrame = false)
+        subtitleMenuSelectionIndex = SUBTITLE_NONE_INDEX
+        pendingSubtitleMenuSelectionId = null
+        clearSubtitleMessage()
+        binding.subtitleOverlay.visibility = View.VISIBLE
+        resetProgressTapGesture()
+        resetSubtitleMenuTapGesture()
+        setControlsVisible(true, keepVisible = true)
+    }
+
+    private fun closeSubtitleMenu(notifyFrame: Boolean = true) {
+        if (binding.subtitleOverlay.visibility != View.VISIBLE) return
+        binding.subtitleOverlay.visibility = View.GONE
+        subtitleMenuSelectionIndex = SUBTITLE_NONE_INDEX
+        pendingSubtitleMenuSelectionId = null
+        clearSubtitleMessage()
+        resetSubtitleMenuTapGesture()
+        if (binding.controlsOverlay.visibility == View.VISIBLE) {
+            applySelection()
+        }
+        if (notifyFrame) {
+            (activity as? MainActivity)?.binocularRenderer?.notifyFrameChanged()
+        }
+    }
+
+    private fun closeSubtitleImportOverlay(notifyFrame: Boolean = true) {
+        if (binding.subtitleImportOverlay.visibility != View.VISIBLE) return
+        binding.subtitleImportOverlay.visibility = View.GONE
+        subtitleImportLoadJob?.cancel()
+        subtitleImportLoadJob = null
+        subtitleImportSelectionIndex = 0
+        subtitleImportCandidates = emptyList()
+        renderSubtitleImportRows()
+        resetSubtitleMenuTapGesture()
         if (binding.controlsOverlay.visibility == View.VISIBLE) {
             applySelection()
         }
@@ -516,11 +808,16 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
             }
             MainControl.PROGRESS -> when (direction) {
                 TempleDirection.LEFT -> MainControl.STOP
+                TempleDirection.RIGHT -> MainControl.CAPTIONS
+                else -> current
+            }
+            MainControl.CAPTIONS -> when (direction) {
+                TempleDirection.LEFT -> MainControl.PROGRESS
                 TempleDirection.RIGHT -> MainControl.OPTIONS
                 else -> current
             }
             MainControl.OPTIONS -> when (direction) {
-                TempleDirection.LEFT -> MainControl.PROGRESS
+                TempleDirection.LEFT -> MainControl.CAPTIONS
                 else -> current
             }
         }
@@ -544,19 +841,43 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
         }
     }
 
+    private fun navigateSubtitleMenu(currentIndex: Int, direction: TempleDirection): Int {
+        val lastIndex = (subtitleMenuItemCount() - 1).coerceAtLeast(SUBTITLE_NONE_INDEX)
+        return when (direction) {
+            TempleDirection.UP -> (currentIndex - 1).coerceAtLeast(SUBTITLE_UPLOAD_INDEX)
+            TempleDirection.DOWN -> (currentIndex + 1).coerceAtMost(lastIndex)
+            TempleDirection.LEFT,
+            TempleDirection.RIGHT -> currentIndex.coerceIn(SUBTITLE_UPLOAD_INDEX, lastIndex)
+        }
+    }
+
+    private fun navigateSubtitleImportMenu(currentIndex: Int, direction: TempleDirection): Int {
+        val lastIndex = (subtitleImportCandidates.lastIndex).coerceAtLeast(0)
+        return when (direction) {
+            TempleDirection.UP -> (currentIndex - 1).coerceAtLeast(0)
+            TempleDirection.DOWN -> (currentIndex + 1).coerceAtMost(lastIndex)
+            TempleDirection.LEFT,
+            TempleDirection.RIGHT -> currentIndex.coerceIn(0, lastIndex)
+        }
+    }
+
     private fun applySelection() {
         normalizeAdvancedSelection()
+        normalizeSubtitleSelection()
         val advancedVisible = isAdvancedOptionsVisible()
+        val subtitleImportVisible = isSubtitleImportVisible()
+        val subtitleVisible = isSubtitleMenuVisible()
         listOf(
-            binding.backButton to (mainSelection == MainControl.BACK && !advancedVisible),
-            binding.playPauseButton to (mainSelection == MainControl.PLAY_PAUSE && !advancedVisible),
-            binding.restartButton to (mainSelection == MainControl.RESTART && !advancedVisible),
-            binding.stopButton to (mainSelection == MainControl.STOP && !advancedVisible),
-            binding.optionsButton to (mainSelection == MainControl.OPTIONS && !advancedVisible),
+            binding.backButton to (mainSelection == MainControl.BACK && !advancedVisible && !subtitleVisible && !subtitleImportVisible),
+            binding.playPauseButton to (mainSelection == MainControl.PLAY_PAUSE && !advancedVisible && !subtitleVisible && !subtitleImportVisible),
+            binding.restartButton to (mainSelection == MainControl.RESTART && !advancedVisible && !subtitleVisible && !subtitleImportVisible),
+            binding.stopButton to (mainSelection == MainControl.STOP && !advancedVisible && !subtitleVisible && !subtitleImportVisible),
+            binding.captionsButton to (mainSelection == MainControl.CAPTIONS && !advancedVisible && !subtitleVisible && !subtitleImportVisible),
+            binding.optionsButton to (mainSelection == MainControl.OPTIONS && !advancedVisible && !subtitleVisible && !subtitleImportVisible),
         ).forEach { (button, selected) ->
             styleButton(button, selected)
         }
-        styleProgressContainer(mainSelection == MainControl.PROGRESS && !advancedVisible)
+        styleProgressContainer(mainSelection == MainControl.PROGRESS && !advancedVisible && !subtitleVisible && !subtitleImportVisible)
 
         listOf(
             binding.advancedBackButton to (advancedSelection == AdvancedControl.BACK && advancedVisible),
@@ -566,7 +887,25 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
             styleButton(button, selected)
         }
 
-        if (advancedVisible) {
+        styleButton(binding.subtitleUploadButton, subtitleVisible && subtitleMenuSelectionIndex == SUBTITLE_UPLOAD_INDEX)
+        styleButton(binding.subtitleNoneButton, subtitleVisible && subtitleMenuSelectionIndex == SUBTITLE_NONE_INDEX)
+        subtitleState.subtitles.forEachIndexed { offset, subtitle ->
+            uploadedSubtitleButtons[subtitle.id]?.let { button ->
+                styleButton(button, subtitleVisible && subtitleMenuSelectionIndex == offset + SUBTITLE_FIRST_UPLOADED_INDEX)
+            }
+        }
+
+        subtitleImportButtons.forEachIndexed { index, button ->
+            styleButton(button, subtitleImportVisible && subtitleImportSelectionIndex == index)
+        }
+
+        if (subtitleImportVisible) {
+            subtitleImportSelectionView()?.requestFocus()
+            ensureSubtitleImportSelectionVisible()
+        } else if (subtitleVisible) {
+            subtitleSelectionView()?.requestFocus()
+            ensureSubtitleSelectionVisible()
+        } else if (advancedVisible) {
             selectionView(advancedSelection)?.requestFocus()
         } else {
             selectionView(mainSelection)?.requestFocus()
@@ -595,6 +934,143 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
             }
             AdvancedControl.BACK -> AdvancedControl.BACK
         }
+    }
+
+    private fun normalizeSubtitleSelection() {
+        val lastIndex = (subtitleMenuItemCount() - 1).coerceAtLeast(SUBTITLE_NONE_INDEX)
+        subtitleMenuSelectionIndex = subtitleMenuSelectionIndex.coerceIn(SUBTITLE_UPLOAD_INDEX, lastIndex)
+    }
+
+    private fun renderSubtitleRows(previousMenuSubtitleId: Long? = null) {
+        binding.subtitleNoneButton.text = buildSubtitleRowLabel(
+            getString(R.string.subtitles_none),
+            subtitleState.selectedSubtitleId == null,
+        )
+
+        binding.uploadedSubtitleListContainer.removeAllViews()
+        uploadedSubtitleButtons.clear()
+
+        subtitleState.subtitles.forEach { subtitle ->
+            val button = layoutInflater.inflate(
+                R.layout.row_subtitle_option,
+                binding.uploadedSubtitleListContainer,
+                false,
+            ) as MaterialButton
+            button.text = buildSubtitleRowLabel(
+                subtitle.displayName,
+                subtitle.id == subtitleState.selectedSubtitleId,
+            )
+            button.setOnClickListener { selectSubtitle(subtitle.id) }
+            binding.uploadedSubtitleListContainer.addView(button)
+            uploadedSubtitleButtons[subtitle.id] = button
+        }
+
+        subtitleMenuSelectionIndex = resolveSubtitleMenuSelectionIndex(previousMenuSubtitleId)
+
+        if (_binding != null && binding.controlsOverlay.visibility == View.VISIBLE) {
+            applySelection()
+        }
+    }
+
+    private fun renderSubtitleImportRows() {
+        binding.subtitleImportListContainer.removeAllViews()
+        subtitleImportButtons.clear()
+
+        subtitleImportCandidates.forEach { candidate ->
+            val button = layoutInflater.inflate(
+                R.layout.row_subtitle_option,
+                binding.subtitleImportListContainer,
+                false,
+            ) as MaterialButton
+            button.text = candidate.displayName
+            button.setOnClickListener {
+                val index = subtitleImportButtons.indexOf(button)
+                if (index >= 0) {
+                    subtitleImportSelectionIndex = index
+                    importSubtitleCandidate(index)
+                }
+            }
+            binding.subtitleImportListContainer.addView(button)
+            subtitleImportButtons += button
+        }
+
+        subtitleImportSelectionIndex = subtitleImportSelectionIndex.coerceIn(
+            0,
+            (subtitleImportButtons.lastIndex).coerceAtLeast(0),
+        )
+
+        if (_binding != null && binding.controlsOverlay.visibility == View.VISIBLE) {
+            applySelection()
+        }
+    }
+
+    private fun resolveSubtitleMenuSelectionIndex(previousMenuSubtitleId: Long?): Int {
+        pendingSubtitleMenuSelectionId?.let { preferredId ->
+            indexOfSubtitle(preferredId)?.let { preferredIndex ->
+                pendingSubtitleMenuSelectionId = null
+                return preferredIndex
+            }
+            pendingSubtitleMenuSelectionId = null
+        }
+
+        previousMenuSubtitleId?.let { subtitleId ->
+            indexOfSubtitle(subtitleId)?.let { return it }
+        }
+
+        val lastIndex = (subtitleMenuItemCount() - 1).coerceAtLeast(SUBTITLE_NONE_INDEX)
+        return subtitleMenuSelectionIndex.coerceIn(SUBTITLE_UPLOAD_INDEX, lastIndex)
+    }
+
+    private fun indexOfSubtitle(subtitleId: Long): Int? {
+        val subtitleIndex = subtitleState.subtitles.indexOfFirst { it.id == subtitleId }
+        return if (subtitleIndex >= 0) {
+            subtitleIndex + SUBTITLE_FIRST_UPLOADED_INDEX
+        } else {
+            null
+        }
+    }
+
+    private fun subtitleMenuItemCount(): Int = SUBTITLE_FIRST_UPLOADED_INDEX + subtitleState.subtitles.size
+
+    private fun subtitleIdForMenuIndex(index: Int): Long? {
+        val subtitleListIndex = index - SUBTITLE_FIRST_UPLOADED_INDEX
+        return subtitleState.subtitles.getOrNull(subtitleListIndex)?.id
+    }
+
+    private fun buildSubtitleRowLabel(baseLabel: String, isCurrent: Boolean): String {
+        return if (isCurrent) {
+            baseLabel + getString(R.string.subtitles_current_suffix)
+        } else {
+            baseLabel
+        }
+    }
+
+    private fun ensureSubtitleSelectionVisible() {
+        val selectedView = subtitleSelectionView() ?: return
+        if (selectedView === binding.subtitleUploadButton) return
+
+        binding.subtitleListScrollView.post {
+            val targetScrollY = (selectedView.top - binding.subtitleListScrollView.height / 3).coerceAtLeast(0)
+            binding.subtitleListScrollView.scrollTo(0, targetScrollY)
+        }
+    }
+
+    private fun ensureSubtitleImportSelectionVisible() {
+        val selectedView = subtitleImportSelectionView() ?: return
+        binding.subtitleImportScrollView.post {
+            val targetScrollY = (selectedView.top - binding.subtitleImportScrollView.height / 3).coerceAtLeast(0)
+            binding.subtitleImportScrollView.scrollTo(0, targetScrollY)
+        }
+    }
+
+    private fun showSubtitleMessage(message: String) {
+        binding.subtitleMessageText.text = message
+        binding.subtitleMessageText.visibility = View.VISIBLE
+    }
+
+    private fun clearSubtitleMessage() {
+        binding.subtitleMessageText.text = ""
+        binding.subtitleMessageText.visibility = View.GONE
     }
 
     private fun styleButton(button: MaterialButton, selected: Boolean) {
@@ -641,6 +1117,7 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
             MainControl.RESTART -> binding.restartButton
             MainControl.STOP -> binding.stopButton
             MainControl.PROGRESS -> binding.progressContainer
+            MainControl.CAPTIONS -> binding.captionsButton
             MainControl.OPTIONS -> binding.optionsButton
         }
     }
@@ -651,6 +1128,18 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
             AdvancedControl.PREVIOUS -> binding.previousButton
             AdvancedControl.NEXT -> binding.nextButton
         }
+    }
+
+    private fun subtitleSelectionView(): View? {
+        return when (subtitleMenuSelectionIndex) {
+            SUBTITLE_UPLOAD_INDEX -> binding.subtitleUploadButton
+            SUBTITLE_NONE_INDEX -> binding.subtitleNoneButton
+            else -> subtitleIdForMenuIndex(subtitleMenuSelectionIndex)?.let { uploadedSubtitleButtons[it] }
+        }
+    }
+
+    private fun subtitleImportSelectionView(): View? {
+        return subtitleImportButtons.getOrNull(subtitleImportSelectionIndex)
     }
 
     private fun handleKeyEvent(keyCode: Int, event: KeyEvent): Boolean {
@@ -704,7 +1193,11 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
                 true
             }
             KeyEvent.KEYCODE_BACK -> {
-                if (isAdvancedOptionsVisible()) {
+                if (isSubtitleImportVisible()) {
+                    closeSubtitleImportOverlay()
+                } else if (isSubtitleMenuVisible()) {
+                    closeSubtitleMenu()
+                } else if (isAdvancedOptionsVisible()) {
                     closeAdvancedOptions()
                 } else {
                     callbacks?.onExitPlayerRequested()
@@ -718,18 +1211,31 @@ class PlayerFragment : Fragment(), TempleNavigationHandler {
     private fun resetProgressTapGesture() {
         uiHandler.removeCallbacks(progressForwardRunnable)
         lastProgressTapAt = 0L
-        lastProgressForwardDelta = 0L
+    }
+
+    private fun resetSubtitleMenuTapGesture() {
+        uiHandler.removeCallbacks(subtitleMenuActionRunnable)
+        lastSubtitleMenuTapAt = 0L
+        pendingSubtitleMenuActionIndex = null
     }
 
     private fun isAdvancedOptionsVisible(): Boolean = binding.advancedOptionsOverlay.visibility == View.VISIBLE
+
+    private fun isSubtitleImportVisible(): Boolean = binding.subtitleImportOverlay.visibility == View.VISIBLE
+
+    private fun isSubtitleMenuVisible(): Boolean = binding.subtitleOverlay.visibility == View.VISIBLE
 
     companion object {
         private const val CONTROL_HIDE_DELAY_MS = 3000L
         private const val PLAYBACK_RESTART_THRESHOLD_MS = 1000L
         private const val PROGRESS_DOUBLE_TAP_WINDOW_MS = 350L
+        private const val SUBTITLE_MENU_DOUBLE_TAP_WINDOW_MS = 350L
         private const val PROGRESS_SEEK_MS = 10_000L
         private const val PROGRESS_MAX = 1000L
         private const val PLAY_SYMBOL = "\u25B6"
+        private const val SUBTITLE_UPLOAD_INDEX = 0
+        private const val SUBTITLE_NONE_INDEX = 1
+        private const val SUBTITLE_FIRST_UPLOADED_INDEX = 2
 
         fun newInstance(): PlayerFragment = PlayerFragment()
     }

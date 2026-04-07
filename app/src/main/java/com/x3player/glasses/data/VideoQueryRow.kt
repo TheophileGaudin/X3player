@@ -70,7 +70,7 @@ fun sortVideos(items: List<VideoItem>, sort: LibrarySort): List<VideoItem> = whe
 }
 
 fun buildStandardScanDirectories(rootDirectories: List<java.io.File>): List<java.io.File> =
-    rootDirectories.filter { it.exists() && it.isDirectory && it.canRead() }
+    rootDirectories.filter { it.exists() && it.isDirectory }
 
 fun collectVideoCandidates(
     rootDirectories: List<java.io.File>,
@@ -81,6 +81,7 @@ fun collectVideoCandidates(
         .asSequence()
         .flatMap { directory ->
             directory.walkTopDown()
+                .onFail { _, _ -> }
                 .maxDepth(5)
                 .filter { it.isFile }
                 .filter { file ->
