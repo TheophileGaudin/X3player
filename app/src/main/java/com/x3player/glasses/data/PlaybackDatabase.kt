@@ -11,7 +11,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         UploadedSubtitleEntity::class,
         SubtitleSelectionEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = false,
 )
 abstract class PlaybackDatabase : RoomDatabase() {
@@ -20,8 +20,8 @@ abstract class PlaybackDatabase : RoomDatabase() {
 
     companion object {
         val MIGRATION_1_2 = object : Migration(1, 2) {
-            override fun migrate(database: SupportSQLiteDatabase) {
-                database.execSQL(
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
                     """
                     CREATE TABLE IF NOT EXISTS `uploaded_subtitles` (
                         `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -33,25 +33,49 @@ abstract class PlaybackDatabase : RoomDatabase() {
                     )
                     """.trimIndent()
                 )
-                database.execSQL(
+                db.execSQL(
                     """
                     CREATE UNIQUE INDEX IF NOT EXISTS `index_uploaded_subtitles_videoId_subtitleUri`
                     ON `uploaded_subtitles` (`videoId`, `subtitleUri`)
                     """.trimIndent()
                 )
-                database.execSQL(
+                db.execSQL(
                     """
                     CREATE INDEX IF NOT EXISTS `index_uploaded_subtitles_videoId_createdAtEpochMs`
                     ON `uploaded_subtitles` (`videoId`, `createdAtEpochMs`)
                     """.trimIndent()
                 )
-                database.execSQL(
+                db.execSQL(
                     """
                     CREATE TABLE IF NOT EXISTS `subtitle_selection` (
                         `videoId` INTEGER NOT NULL,
                         `selectedSubtitleId` INTEGER,
                         PRIMARY KEY(`videoId`)
                     )
+                    """.trimIndent()
+                )
+            }
+        }
+
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    ALTER TABLE `subtitle_selection`
+                    ADD COLUMN `selectionMode` TEXT NOT NULL DEFAULT 'EXTERNAL'
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    ALTER TABLE `subtitle_selection`
+                    ADD COLUMN `embeddedTrackKey` TEXT
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    UPDATE `subtitle_selection`
+                    SET `selectionMode` = 'NONE'
+                    WHERE `selectedSubtitleId` IS NULL
                     """.trimIndent()
                 )
             }

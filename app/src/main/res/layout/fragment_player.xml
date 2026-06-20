@@ -16,6 +16,20 @@
         app:surface_type="texture_view"
         app:use_controller="false" />
 
+    <TextView
+        android:id="@+id/playbackMessageText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|center_horizontal"
+        android:layout_marginTop="18dp"
+        android:background="@drawable/error_background"
+        android:gravity="center"
+        android:maxWidth="580dp"
+        android:padding="10dp"
+        android:textColor="@color/text_primary"
+        android:textSize="14sp"
+        android:visibility="gone" />
+
     <LinearLayout
         android:id="@+id/controlsOverlay"
         android:layout_width="match_parent"
@@ -235,6 +249,22 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="14dp"
                 android:text="@string/back" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/seekBackButton"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/seek_back" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/seekForwardButton"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/seek_forward" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/previousButton"

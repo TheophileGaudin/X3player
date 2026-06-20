@@ -28,11 +28,26 @@ class SubtitleFilesTest {
             MimeTypes.APPLICATION_TTML,
             resolveSupportedSubtitleMimeType("text/plain", "movie.ttml"),
         )
+        assertEquals(
+            MimeTypes.APPLICATION_SUBRIP,
+            resolveSupportedSubtitleMimeType("text/plain", "movie.sub"),
+        )
+        assertEquals(
+            MimeTypes.TEXT_VTT,
+            resolveSupportedSubtitleMimeType("application/octet-stream", "movie.vvt"),
+        )
     }
 
     @Test
     fun `rejects unsupported files`() {
-        assertNull(resolveSupportedSubtitleMimeType("text/plain", "movie.txt"))
         assertNull(resolveSupportedSubtitleMimeType(null, null))
+    }
+
+    @Test
+    fun `txt files are accepted for content inspection`() {
+        assertEquals(
+            MimeTypes.APPLICATION_SUBRIP,
+            resolveSupportedSubtitleMimeType("text/plain", "movie.txt"),
+        )
     }
 }

@@ -1,0 +1,19 @@
+X3player optional FFmpeg audio decoder
+======================================
+
+X3player can be distributed with an optional Media3 FFmpeg decoder extension.
+The extension is built from:
+
+- AndroidX Media3 1.9.4, Apache License 2.0
+  https://github.com/androidx/media/tree/1.9.4
+- FFmpeg 6.0 at commit ea3d24bbe3c58b171e55fe2151fc7ffaca3ab3d2
+  https://github.com/FFmpeg/FFmpeg/tree/ea3d24bbe3c58b171e55fe2151fc7ffaca3ab3d2
+
+The X3player build enables only the FFmpeg AC-3, E-AC-3, DTS/DTS-HD, MLP, and
+TrueHD audio decoders. It does not enable FFmpeg GPL or non-free components.
+FFmpeg is licensed under the GNU Lesser General Public License, version 2.1 or
+later. The corresponding source archive, license text, build scripts, and build
+configuration must be distributed with every APK that contains the decoder.
+
+Release publication is blocked until the matching source archive produced by
+tools/ffmpeg/package-source.ps1 has been reviewed and published beside the APK.

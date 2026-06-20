@@ -4,9 +4,14 @@ import android.content.Context
 import android.content.ContentUris
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.provider.MediaStore
 import com.x3player.glasses.util.isSupportedSubtitleFileName
+import com.x3player.glasses.util.normalizeTextSubtitleForPlayback
 import com.x3player.glasses.util.resolveSupportedSubtitleMimeType
+import com.x3player.glasses.util.SubtitleImportType
+import com.x3player.glasses.util.subtitleExtension
+import java.io.File
 import java.util.Locale
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -35,6 +40,7 @@ class LocalSubtitleImportScanner(
                     resolveSupportedSubtitleMimeType(row.mimeType, row.displayName) != null
             }
             .filter { row -> isAllowedImportPath(row.relativePath) }
+            .filter { row -> isUsableSubtitleCandidate(row) }
             .distinctBy { it.contentUri.toString() }
             .map { row ->
                 LocalSubtitleCandidate(
@@ -55,6 +61,11 @@ class LocalSubtitleImportScanner(
     }
 
     private fun querySubtitleRows(): List<SubtitleMediaRow> {
+        return (queryMediaStoreSubtitleRows() + queryFileSystemSubtitleRows())
+            .distinctBy { row -> row.fileIdentityKey() }
+    }
+
+    private fun queryMediaStoreSubtitleRows(): List<SubtitleMediaRow> {
         val collection = MediaStore.Files.getContentUri("external")
         val projection = buildList {
             add(MediaStore.Files.FileColumns._ID)
@@ -96,6 +107,51 @@ class LocalSubtitleImportScanner(
         return results
     }
 
+    private fun queryFileSystemSubtitleRows(): List<SubtitleMediaRow> {
+        val standardDirectories = buildStandardScanDirectories(
+            listOf(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS),
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
+            )
+        )
+        if (standardDirectories.isEmpty()) {
+            return emptyList()
+        }
+
+        val externalStorageRoot = Environment.getExternalStorageDirectory()
+        return standardDirectories
+            .asSequence()
+            .flatMap { directory ->
+                directory.walkTopDown()
+                    .onFail { _, _ -> }
+                    .maxDepth(MAX_SCAN_DEPTH)
+                    .filter { file -> file.isFile && isSupportedSubtitleFileName(file.name) }
+                    .map { file ->
+                        SubtitleMediaRow(
+                            displayName = file.name,
+                            contentUri = Uri.fromFile(file),
+                            modifiedAtMs = file.lastModified().coerceAtLeast(0L),
+                            mimeType = resolveSupportedSubtitleMimeType(null, file.name),
+                            relativePath = resolveRelativePath(file, externalStorageRoot),
+                        )
+                    }
+            }
+            .toList()
+    }
+
+    private fun resolveRelativePath(file: File, externalStorageRoot: File): String? {
+        val parent = file.parentFile ?: return null
+        val rootPath = externalStorageRoot.absolutePath.trimEnd(File.separatorChar)
+        val parentPath = parent.absolutePath
+        if (!parentPath.startsWith(rootPath)) return null
+        val normalizedPath = parentPath
+            .removePrefix(rootPath)
+            .trimStart(File.separatorChar)
+            .replace(File.separatorChar, '/')
+        return if (normalizedPath.isBlank()) null else "$normalizedPath/"
+    }
+
     private fun subtitleMatchRank(normalizedVideoStem: String, subtitleName: String): Int {
         val normalizedSubtitleStem = subtitleName
             .substringBeforeLast('.', subtitleName)
@@ -111,12 +167,43 @@ class LocalSubtitleImportScanner(
         }
     }
 
+    private fun isUsableSubtitleCandidate(row: SubtitleMediaRow): Boolean {
+        if (subtitleExtension(row.displayName) != "txt") return true
+        val probeBytes = runCatching {
+            context.contentResolver.openInputStream(row.contentUri)?.use { inputStream ->
+                val buffer = ByteArray(MAX_TEXT_PROBE_BYTES)
+                val byteCount = inputStream.read(buffer)
+                if (byteCount <= 0) ByteArray(0) else buffer.copyOf(byteCount)
+            }
+        }.getOrNull() ?: return false
+        if (probeBytes.isEmpty()) return false
+
+        val probeText = probeBytes.toString(Charsets.ISO_8859_1)
+        return normalizeTextSubtitleForPlayback(SubtitleImportType.TEXT_AUTO, probeText) != null
+    }
+
     private fun isAllowedImportPath(relativePath: String?): Boolean {
         if (relativePath.isNullOrBlank()) return false
         val normalized = relativePath.lowercase(Locale.US)
         return normalized.startsWith("documents/") ||
             normalized.startsWith("download/") ||
             normalized.startsWith("movies/")
+    }
+
+    private fun SubtitleMediaRow.fileIdentityKey(): String {
+        val normalizedRelativePath = relativePath
+            ?.replace('\\', '/')
+            ?.trim()
+            ?.trimStart('/')
+            ?.trimEnd('/')
+            ?.lowercase(Locale.US)
+            .orEmpty()
+        val normalizedName = displayName.lowercase(Locale.US)
+        return if (normalizedRelativePath.isNotBlank()) {
+            "$normalizedRelativePath/$normalizedName"
+        } else {
+            contentUri.toString()
+        }
     }
 
     private data class SubtitleMediaRow(
@@ -129,5 +216,7 @@ class LocalSubtitleImportScanner(
 
     companion object {
         private const val MAX_RESULTS = 150
+        private const val MAX_SCAN_DEPTH = 5
+        private const val MAX_TEXT_PROBE_BYTES = 64 * 1024
     }
 }

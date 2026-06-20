@@ -15,7 +15,10 @@ class AppContainer(application: Application) {
 
     private val database: PlaybackDatabase by lazy {
         Room.databaseBuilder(appContext, PlaybackDatabase::class.java, "x3player.db")
-            .addMigrations(PlaybackDatabase.MIGRATION_1_2)
+            .addMigrations(
+                PlaybackDatabase.MIGRATION_1_2,
+                PlaybackDatabase.MIGRATION_2_3,
+            )
             .build()
     }
 

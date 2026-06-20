@@ -3,6 +3,7 @@ package com.x3player.glasses.data
 import android.content.Context
 import android.database.Cursor
 import android.media.MediaScannerConnection
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -24,6 +25,11 @@ import kotlin.coroutines.resume
 class MediaStoreVideoRepository(
     private val context: Context,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val videoUriReadable: (Uri) -> Boolean = { contentUri ->
+        runCatching {
+            context.contentResolver.openFileDescriptor(contentUri, "r")?.use { true } ?: false
+        }.getOrDefault(false)
+    },
 ) : VideoRepository {
 
     private val refreshVersion = MutableStateFlow(0)
@@ -94,7 +100,10 @@ class MediaStoreVideoRepository(
                     relativePath = indexes.relativePath?.let(cursor::getNullableString),
                 )
                 if (matchesFilter(filter, row.bucketName, row.relativePath)) {
-                    items += mapVideoQueryRow(row)
+                    val item = mapVideoQueryRow(row)
+                    if (videoUriReadable(item.contentUri)) {
+                        items += item
+                    }
                 }
             }
         }

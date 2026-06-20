@@ -8,5 +8,12 @@ keystore.properties
 .idea/modules.xml
 .idea/navEditor.xml
 .idea/runConfigurations/
+.claude/
 .DS_Store
 Thumbs.db
+app/libs/*.aar
+!app/libs/media3-decoder-ffmpeg-1.9.4.aar
+tools/ffmpeg/.build/
+tools/ffmpeg/release-source/
+tools/media-fixtures/output/
+release/

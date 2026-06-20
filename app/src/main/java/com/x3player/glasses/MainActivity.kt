@@ -13,6 +13,7 @@ import androidx.core.view.isVisible
 import androidx.fragment.app.FragmentManager
 import androidx.fragment.app.commit
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.whenResumed
 import com.x3player.glasses.binocular.BinocularPlayerLayout
 import com.x3player.glasses.data.VideoItem
 import com.x3player.glasses.databinding.ActivityMainBinding
@@ -123,7 +124,11 @@ class MainActivity : AppCompatActivity(), LibraryFragment.Callbacks, PlayerFragm
 
         if (supportFragmentManager.findFragmentById(binding.fragmentContainer.id) == null) {
             lifecycleScope.launch {
-                openInitialScreen()
+                lifecycle.whenResumed {
+                    if (supportFragmentManager.findFragmentById(binding.fragmentContainer.id) == null) {
+                        openInitialScreen()
+                    }
+                }
             }
         }
     }
@@ -142,6 +147,7 @@ class MainActivity : AppCompatActivity(), LibraryFragment.Callbacks, PlayerFragm
     }
 
     private fun showLibrary(clearBackStack: Boolean = false) {
+        if (supportFragmentManager.isStateSaved || isFinishing || isDestroyed) return
         binding.binocularLayout.setMirrorMode(false)
         if (clearBackStack) {
             supportFragmentManager.popBackStack(null, FragmentManager.POP_BACK_STACK_INCLUSIVE)
@@ -154,6 +160,7 @@ class MainActivity : AppCompatActivity(), LibraryFragment.Callbacks, PlayerFragm
     }
 
     private fun showPlayer(clearBackStack: Boolean = false) {
+        if (supportFragmentManager.isStateSaved || isFinishing || isDestroyed) return
         if (clearBackStack) {
             supportFragmentManager.popBackStack(null, FragmentManager.POP_BACK_STACK_INCLUSIVE)
         }
@@ -199,9 +206,17 @@ class MainActivity : AppCompatActivity(), LibraryFragment.Callbacks, PlayerFragm
 
             MotionEvent.ACTION_UP, MotionEvent.ACTION_HOVER_EXIT -> {
                 val duration = System.currentTimeMillis() - templeDownTime
+                activeTempleHandler()?.onTempleInteractionFinished()
                 if (templeTotalDistance < TAP_MAX_DISTANCE && duration < TAP_MAX_DURATION) {
                     performFocusedClick()
                 }
+                templeFocusAccumulatorX = 0f
+                templeFocusAccumulatorY = 0f
+                return true
+            }
+
+            MotionEvent.ACTION_CANCEL -> {
+                activeTempleHandler()?.onTempleInteractionFinished()
                 templeFocusAccumulatorX = 0f
                 templeFocusAccumulatorY = 0f
                 return true

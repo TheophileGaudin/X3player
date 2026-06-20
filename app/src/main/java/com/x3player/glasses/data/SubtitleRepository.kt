@@ -3,7 +3,6 @@ package com.x3player.glasses.data
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
-import com.x3player.glasses.util.resolveSupportedSubtitleMimeType
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 
@@ -11,18 +10,17 @@ class SubtitleRepository(
     private val context: Context,
     private val videoSubtitleDao: VideoSubtitleDao,
 ) {
+    private val subtitleImportPreparer = SubtitleImportPreparer(context)
+
     fun observeVideoSubtitles(videoId: Long): Flow<VideoSubtitleState> {
         return combine(
             videoSubtitleDao.observeSubtitles(videoId),
-            videoSubtitleDao.observeSelectedSubtitleId(videoId),
-        ) { subtitles, selectedSubtitleId ->
+            videoSubtitleDao.observeSelection(videoId),
+        ) { subtitles, selectionEntity ->
             val mapped = subtitles.map { it.toModel() }
-            val normalizedSelection = selectedSubtitleId?.takeIf { id ->
-                mapped.any { subtitle -> subtitle.id == id }
-            }
             VideoSubtitleState(
                 subtitles = mapped,
-                selectedSubtitleId = normalizedSelection,
+                selection = selectionEntity?.toModel(mapped),
             )
         }
     }
@@ -30,17 +28,22 @@ class SubtitleRepository(
     suspend fun addSubtitle(videoId: Long, contentUri: Uri): UploadedSubtitle {
         val displayName = queryDisplayName(contentUri) ?: contentUri.lastPathSegment ?: "Subtitle"
         val rawMimeType = context.contentResolver.getType(contentUri)
-        val mimeType = resolveSupportedSubtitleMimeType(rawMimeType, displayName)
-            ?: throw IllegalArgumentException("Unsupported subtitle format.")
+        val preparedSubtitle = subtitleImportPreparer.prepare(
+            videoId = videoId,
+            contentUri = contentUri,
+            displayName = displayName,
+            rawMimeType = rawMimeType,
+        )
         val now = System.currentTimeMillis()
-        val existing = videoSubtitleDao.findByVideoIdAndUri(videoId, contentUri.toString())
+        val storedSubtitleUri = preparedSubtitle.playbackUri.toString()
+        val existing = videoSubtitleDao.findByVideoIdAndUri(videoId, storedSubtitleUri)
         val subtitleId = if (existing == null) {
             videoSubtitleDao.insertSubtitle(
                 UploadedSubtitleEntity(
                     videoId = videoId,
-                    subtitleUri = contentUri.toString(),
+                    subtitleUri = storedSubtitleUri,
                     displayName = displayName,
-                    mimeType = mimeType,
+                    mimeType = preparedSubtitle.mimeType,
                     createdAtEpochMs = now,
                 )
             )
@@ -48,7 +51,7 @@ class SubtitleRepository(
             videoSubtitleDao.updateSubtitle(
                 existing.copy(
                     displayName = displayName,
-                    mimeType = mimeType,
+                    mimeType = preparedSubtitle.mimeType,
                     createdAtEpochMs = now,
                 )
             )
@@ -57,23 +60,49 @@ class SubtitleRepository(
         videoSubtitleDao.upsertSelection(
             SubtitleSelectionEntity(
                 videoId = videoId,
+                selectionMode = SubtitleSelectionMode.EXTERNAL.name,
                 selectedSubtitleId = subtitleId,
+                embeddedTrackKey = null,
             )
         )
         return requireNotNull(videoSubtitleDao.getById(subtitleId)?.toModel())
     }
 
-    suspend fun selectSubtitle(videoId: Long, subtitleId: Long?) {
-        if (subtitleId == null) {
-            videoSubtitleDao.clearSelection(videoId)
-        } else {
-            videoSubtitleDao.upsertSelection(
-                SubtitleSelectionEntity(
-                    videoId = videoId,
-                    selectedSubtitleId = subtitleId,
-                )
+    suspend fun selectNone(videoId: Long) {
+        videoSubtitleDao.upsertSelection(
+            SubtitleSelectionEntity(
+                videoId = videoId,
+                selectionMode = SubtitleSelectionMode.NONE.name,
+                selectedSubtitleId = null,
+                embeddedTrackKey = null,
             )
-        }
+        )
+    }
+
+    suspend fun selectExternal(videoId: Long, subtitleId: Long) {
+        videoSubtitleDao.upsertSelection(
+            SubtitleSelectionEntity(
+                videoId = videoId,
+                selectionMode = SubtitleSelectionMode.EXTERNAL.name,
+                selectedSubtitleId = subtitleId,
+                embeddedTrackKey = null,
+            )
+        )
+    }
+
+    suspend fun selectEmbedded(videoId: Long, trackKey: String) {
+        videoSubtitleDao.upsertSelection(
+            SubtitleSelectionEntity(
+                videoId = videoId,
+                selectionMode = SubtitleSelectionMode.EMBEDDED.name,
+                selectedSubtitleId = null,
+                embeddedTrackKey = trackKey,
+            )
+        )
+    }
+
+    suspend fun clearPreference(videoId: Long) {
+        videoSubtitleDao.clearPreference(videoId)
     }
 
     private fun queryDisplayName(contentUri: Uri): String? {
@@ -89,6 +118,33 @@ class SubtitleRepository(
                 cursor.getString(nameIndex)
             } else {
                 null
+            }
+        }
+    }
+}
+
+private fun SubtitleSelectionEntity.toModel(
+    subtitles: List<UploadedSubtitle>,
+): SubtitleSelection {
+    val mode = runCatching { SubtitleSelectionMode.valueOf(selectionMode) }
+        .getOrDefault(SubtitleSelectionMode.NONE)
+    return when (mode) {
+        SubtitleSelectionMode.NONE -> SubtitleSelection(mode)
+        SubtitleSelectionMode.EMBEDDED -> SubtitleSelection(
+            mode = mode,
+            embeddedTrackKey = embeddedTrackKey,
+        )
+        SubtitleSelectionMode.EXTERNAL -> {
+            val externalId = selectedSubtitleId?.takeIf { selectedId ->
+                subtitles.any { it.id == selectedId }
+            }
+            if (externalId == null) {
+                SubtitleSelection(SubtitleSelectionMode.NONE)
+            } else {
+                SubtitleSelection(
+                    mode = mode,
+                    externalSubtitleId = externalId,
+                )
             }
         }
     }

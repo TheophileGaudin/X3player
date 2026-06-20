@@ -11,4 +11,5 @@ interface TempleNavigationHandler {
     fun onTempleNavigate(direction: TempleDirection): Boolean
     fun onTempleTap(): Boolean
     fun onTempleEnsureFocus() {}
+    fun onTempleInteractionFinished() {}
 }

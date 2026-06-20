@@ -11,10 +11,25 @@ data class UploadedSubtitle(
     val createdAtEpochMs: Long,
 )
 
+enum class SubtitleSelectionMode {
+    NONE,
+    EMBEDDED,
+    EXTERNAL,
+}
+
+data class SubtitleSelection(
+    val mode: SubtitleSelectionMode,
+    val externalSubtitleId: Long? = null,
+    val embeddedTrackKey: String? = null,
+)
+
 data class VideoSubtitleState(
     val subtitles: List<UploadedSubtitle> = emptyList(),
-    val selectedSubtitleId: Long? = null,
+    val selection: SubtitleSelection? = null,
 ) {
     val selectedSubtitle: UploadedSubtitle?
-        get() = subtitles.firstOrNull { it.id == selectedSubtitleId }
+        get() = selection
+            ?.takeIf { it.mode == SubtitleSelectionMode.EXTERNAL }
+            ?.externalSubtitleId
+            ?.let { selectedId -> subtitles.firstOrNull { it.id == selectedId } }
 }

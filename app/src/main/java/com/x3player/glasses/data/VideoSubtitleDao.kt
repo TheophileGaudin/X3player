@@ -20,12 +20,12 @@ interface VideoSubtitleDao {
 
     @Query(
         """
-        SELECT selectedSubtitleId FROM subtitle_selection
+        SELECT * FROM subtitle_selection
         WHERE videoId = :videoId
         LIMIT 1
         """
     )
-    fun observeSelectedSubtitleId(videoId: Long): Flow<Long?>
+    fun observeSelection(videoId: Long): Flow<SubtitleSelectionEntity?>
 
     @Query(
         """
@@ -55,5 +55,5 @@ interface VideoSubtitleDao {
     suspend fun upsertSelection(entity: SubtitleSelectionEntity)
 
     @Query("DELETE FROM subtitle_selection WHERE videoId = :videoId")
-    suspend fun clearSelection(videoId: Long)
+    suspend fun clearPreference(videoId: Long)
 }

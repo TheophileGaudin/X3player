@@ -18,8 +18,10 @@
   - horizontal swipes move within the selected control row
   - a tap activates the currently highlighted video or control
   - player controls use explicit highlight state rather than generic Android focus
-  - the player includes a `CC` control that opens a subtitle menu with `Upload`, `None`, and uploaded subtitle rows
+  - the player includes a `CC` control that opens a subtitle menu with `Upload`, `None`, embedded tracks, and uploaded subtitle rows
   - subtitle menu navigation is vertical, `None` is the default highlighted row on open, and double tap exits the menu
+  - main controls hide three seconds after the latest interaction ends (including finger release after a swipe) while playing; paused/error/menu states remain visible
+  - the advanced menu includes repeated `Rewind 10s` and `Forward 10s` actions
 
 ## Codebase Map
 - App entry and wiring:
@@ -37,6 +39,7 @@
   - `app/src/main/res/layout/fragment_player.xml`
 - Subtitle upload and persistence:
   - `app/src/main/java/com/x3player/glasses/data/LocalSubtitleImportScanner.kt`
+  - `app/src/main/java/com/x3player/glasses/data/SubtitleImportPreparer.kt`
   - `app/src/main/java/com/x3player/glasses/data/SubtitleRepository.kt`
   - `app/src/main/java/com/x3player/glasses/data/VideoSubtitleDao.kt`
   - `app/src/main/java/com/x3player/glasses/data/UploadedSubtitle*`
@@ -67,7 +70,7 @@
 - Temple gesture or menu-navigation bug: start in `MainActivity.kt`, `TempleNavigationHandler.kt`, then the relevant fragment.
 - Library filter, sort, or default-selection bug: start in `LibraryFragment.kt`, `LibraryViewModel.kt`, then `MediaStoreVideoRepository.kt`.
 - Playback-control, queue, or resume bug: start in `PlayerFragment.kt`, `PlaybackQueueViewModel.kt`, `ResumePolicy.kt`, and the `PlaybackProgress*` classes.
-- Subtitle upload, import, selection, or persistence bug: start in `PlayerFragment.kt`, then `LocalSubtitleImportScanner.kt`, `SubtitleRepository.kt`, `VideoSubtitleDao.kt`, and `PlaybackDatabase.kt`.
+- Subtitle upload, import, selection, or persistence bug: start in `PlayerFragment.kt`, then `LocalSubtitleImportScanner.kt`, `SubtitleImportPreparer.kt`, `SubtitleRepository.kt`, `VideoSubtitleDao.kt`, and `PlaybackDatabase.kt`.
 - One-eye playback or binocular regression: start in `BinocularPlayerLayout.kt` and `fragment_player.xml`.
 - Storage permission or missing-video scan issue: start in `StoragePermissionHelper.kt` and `MediaStoreVideoRepository.kt`.
 - Focus highlight or selected-state visuals: start in the fragment layout plus `VideoListAdapter.kt` or `PlayerFragment.kt`.
@@ -76,12 +79,18 @@
 - The player layout currently relies on mirrored whole-view duplication for binocular playback.
 - `fragment_player.xml` uses `TextureView`-based playback rather than `SurfaceView`; if one-eye playback regresses, check this before larger rewrites.
 - The library and player both use explicit internal selection/highlight state; do not assume standard Android focus navigation is the source of truth.
-- Subtitle upload now scans `MediaStore` entries from `Documents`, `Download`, and `Movies`, then persists the chosen subtitle per video via Room.
+- Subtitle upload now scans `MediaStore` entries and directly enumerates `Documents`, `Download`, and `Movies`, copies imports into app-managed storage, then persists the chosen subtitle per video via Room.
+- Subtitle selection is Room database version 3 and persists `NONE`, `EMBEDDED`, or `EXTERNAL` per video. All external tracks remain attached to the current media item.
+- `.sub` imports are normalized into a Media3-supported playback format at import time, `.vvt` is accepted as a WebVTT alias, and `.txt` is accepted only when timed subtitle content is detected.
+- Embedded forced/default tracks are selected only when no saved preference exists; otherwise subtitles start off.
+- Media3 is pinned to `1.9.4` with compile SDK 35.
+- The video repository verifies each MediaStore content URI can be opened before exposing it, so stale rows for moved or deleted files do not appear in the library.
+- Optional arm64 FFmpeg audio support is enabled only when `app/libs/media3-decoder-ffmpeg-1.9.4.aar` exists. Build and LGPL source-package tooling lives under `tools/ffmpeg/`.
 - The app is intentionally minimal for v1: local playback only, no phone companion flow, and no playlists.
 
 ## Build And Release
 - Primary workflow is Android Studio.
-- CLI has already been validated for `testDebugUnitTest`, `assembleDebug`, `assembleDebugAndroidTest`, and signed `assembleRelease`.
+- CLI has already been validated for `testDebugUnitTest`, `assembleDebug`, `assembleDebugAndroidTest`, `connectedDebugAndroidTest`, and signed `assembleRelease`.
 - On this machine, the working CLI environment is:
 
 ```powershell
@@ -93,6 +102,7 @@ $env:ANDROID_SDK_ROOT=$env:ANDROID_HOME
 - Signed release builds use a gitignored `keystore.properties` in the repo root; `app/build.gradle` reads it automatically if present.
 - The actual release keystore is stored outside the repo under the user's `.android\keystores` directory.
 - Never commit the keystore or `keystore.properties`.
+- Never publish an APK containing the FFmpeg decoder AAR until the matching source bundle and LGPL review described in `tools/ffmpeg/README.md` are complete.
 - Signed release build command:
 
 ```powershell

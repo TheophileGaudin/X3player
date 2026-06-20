@@ -3,7 +3,19 @@ package com.x3player.glasses.util
 import androidx.media3.common.MimeTypes
 import java.util.Locale
 
-fun resolveSupportedSubtitleMimeType(rawMimeType: String?, displayName: String?): String? {
+enum class SubtitleImportType(
+    val playbackMimeType: String,
+    val canonicalExtension: String,
+) {
+    SUBRIP(MimeTypes.APPLICATION_SUBRIP, "srt"),
+    WEBVTT(MimeTypes.TEXT_VTT, "vtt"),
+    SSA(MimeTypes.TEXT_SSA, "ssa"),
+    TTML(MimeTypes.APPLICATION_TTML, "ttml"),
+    SUB(MimeTypes.APPLICATION_SUBRIP, "srt"),
+    TEXT_AUTO(MimeTypes.APPLICATION_SUBRIP, "srt"),
+}
+
+fun resolveSupportedSubtitleImportType(rawMimeType: String?, displayName: String?): SubtitleImportType? {
     val normalizedMimeType = rawMimeType
         ?.substringBefore(';')
         ?.trim()
@@ -12,30 +24,48 @@ fun resolveSupportedSubtitleMimeType(rawMimeType: String?, displayName: String?)
     when (normalizedMimeType) {
         "application/x-subrip",
         "application/srt",
-        "text/srt" -> return MimeTypes.APPLICATION_SUBRIP
+        "text/srt" -> return SubtitleImportType.SUBRIP
 
-        MimeTypes.TEXT_VTT -> return MimeTypes.TEXT_VTT
+        MimeTypes.TEXT_VTT,
+        "application/x-webvtt",
+        "application/vtt" -> return SubtitleImportType.WEBVTT
 
         "text/x-ssa",
         "text/x-ass",
-        "application/x-ass" -> return MimeTypes.TEXT_SSA
+        "application/x-ass" -> return SubtitleImportType.SSA
 
-        "application/ttml+xml" -> return MimeTypes.APPLICATION_TTML
+        "application/ttml+xml" -> return SubtitleImportType.TTML
+
+        "application/x-subviewer",
+        "text/x-subviewer",
+        "text/x-microdvd",
+        "text/x-mpl2" -> return SubtitleImportType.SUB
     }
 
-    val extension = displayName
-        ?.substringAfterLast('.', missingDelimiterValue = "")
-        ?.lowercase(Locale.ROOT)
+    val extension = subtitleExtension(displayName)
 
     return when (extension) {
-        "srt" -> MimeTypes.APPLICATION_SUBRIP
-        "vtt" -> MimeTypes.TEXT_VTT
-        "ssa", "ass" -> MimeTypes.TEXT_SSA
-        "ttml", "dfxp", "xml" -> MimeTypes.APPLICATION_TTML
+        "srt" -> SubtitleImportType.SUBRIP
+        "vtt", "vvt" -> SubtitleImportType.WEBVTT
+        "ssa", "ass" -> SubtitleImportType.SSA
+        "ttml", "dfxp", "xml" -> SubtitleImportType.TTML
+        "sub" -> SubtitleImportType.SUB
+        "txt" -> SubtitleImportType.TEXT_AUTO
         else -> null
     }
 }
 
+fun resolveSupportedSubtitleMimeType(rawMimeType: String?, displayName: String?): String? {
+    return resolveSupportedSubtitleImportType(rawMimeType, displayName)?.playbackMimeType
+}
+
 fun isSupportedSubtitleFileName(displayName: String?): Boolean {
-    return resolveSupportedSubtitleMimeType(null, displayName) != null
+    return resolveSupportedSubtitleImportType(null, displayName) != null
+}
+
+fun subtitleExtension(displayName: String?): String {
+    return displayName
+        ?.substringAfterLast('.', missingDelimiterValue = "")
+        ?.lowercase(Locale.ROOT)
+        .orEmpty()
 }
